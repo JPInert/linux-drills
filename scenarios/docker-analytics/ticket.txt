@@ -1,0 +1,14 @@
+From:     Pay station, Northgate Garage (level 2 deck)
+Priority: P1
+Box:      edge-nvr-03  (vehicle counting + NVR, NVIDIA GPU)
+
+  "Since this morning fall alerts reach the attendants' pagers 20 to 30
+   seconds after the fall. The live camera video on the station monitors
+   is smooth, no lag. The vendor's overnight update (vehicle-count 2.4.1)
+   ran on this box last night and its report says everything is healthy.
+   Vehicle counting runs as containers on this box."
+
+You are `tech`, with sudo. Get alerts back to normal speed. Stay on 2.4.1:
+the vendor says it fixes night-mode false alarms, so do not roll it back.
+Whatever you change must survive a reboot, and tell us what to raise
+with the vendor.

@@ -1,0 +1,14 @@
+From:     Facilities tech lead, Northgate Garage (level 2 deck)
+Priority: P2
+Box:      edge-nvr-03  (vehicle counting, NVIDIA GPU, in the closet by the
+          attendants' break room)
+
+  "Fall alerts come 5 to 10 seconds late, but only in the afternoons.
+   Mornings they are instant. It's the afternoon now and they're late
+   again. Afternoon is visiting hours, so we think the guest WiFi is
+   slowing the network down. Nobody has changed anything on the box
+   that we know of."
+
+You are `tech`, with sudo. Get alerts on time again, and make it stick
+across a reboot. If the cause is something the site asked for, tell us
+what to do about it instead.

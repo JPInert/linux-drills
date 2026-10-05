@@ -1,0 +1,14 @@
+From:     Site lead, Northgate Garage
+Priority: P3
+Box:      edge-nvr-03  (GPU analytics + NVR)
+
+  "Person detections are showing up on the wall display about ten times
+   slower than they did at install. The camera video itself is smooth.
+   Site IT already swapped the patch cable and the switch port and it
+   made no difference. The analytics service says it is running, and the
+   box has an NVIDIA card in it: the model is supposed to be running on
+   that."
+
+You are `tech`, with sudo. Get the analytics back on the GPU. It has to be
+the analytics service itself that holds the GPU (not a copy you start by
+hand), and it has to stay that way after the next service restart.

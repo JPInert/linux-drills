@@ -1,0 +1,3 @@
+Before anyone buys a camera, compare camera7 with the cameras that work: how does it connect, and when it drops, does the camera itself restart or just its link?
+The NVR logs every drop (/var/log/nvr/nvr.log) and keeps the last status it read from each camera in /var/lib/nvr/cameras/, one file per camera: grep one field across all of them to compare, and count the drops per camera.
+Run: grep OFFLINE /var/log/nvr/nvr.log | grep -o 'cam[0-9]*' | sort | uniq -c  (-o = print only the match, uniq -c = count each)  ;  cat /var/lib/nvr/cameras/cam07.json  ;  grep rssi /var/lib/nvr/cameras/*.json  (signal in dBm: -50 strong, -80 weak). Then answer with the cause, that number, and who should change what.

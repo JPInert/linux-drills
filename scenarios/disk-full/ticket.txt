@@ -1,0 +1,9 @@
+From:     NOC monitoring (auto) + site lead
+Priority: P2
+Box:      edge-nvr-03  (analytics + NVR at the Northgate Garage site)
+
+  "Disk alert fired an hour ago. Detections stopped showing in the
+   dashboard and the analytics service is throwing errors. It was fine
+   yesterday. Nobody has touched the box."
+
+You are `tech`, with sudo. Get it healthy and stop it coming back.

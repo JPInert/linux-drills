@@ -1,0 +1,3 @@
+Start on this box, not at the camera: does it have the right address, and where does it send traffic for other networks (its default gateway)? Compare both with the install sheet in your home directory.
+`ip a` shows the box's address (the "inet" line under eth0). `ip r` shows its routes: the "default via" line is the gateway everything off this subnet goes through. `traceroute` then shows WHICH device answers as hop 1.
+`cat ~/install-sheet.txt` for the right gateway; `sudo ip route replace default via 10.50.0.254` swaps the default route (replace, not add, so you don't end up with two); then `ping -c 3 10.50.1.31` (-c 3 = send 3 pings then stop) and `curl http://10.50.1.31/` to prove the camera's web page answers.

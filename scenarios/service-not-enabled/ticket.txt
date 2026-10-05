@@ -1,0 +1,14 @@
+From:     Security desk, Northgate Garage (guard station)
+Priority: P2
+Box:      edge-nvr-03
+
+  "Since the box was rebooted for updates last night, the guard station
+   can't pull up any camera feeds. The relay page on port 8090 refuses
+   the connection from every PC on the desk. Someone said it's the
+   network, but the switch and firewall people swear nothing changed,
+   and the box answers ping fine."
+
+You are `tech`, with sudo, on the box console. The relay is the
+`camwatch` service. Its feeds MUST be back on :8090, and this is the
+second patch reboot in a row that has killed them: it has to stay up
+after the next one too.

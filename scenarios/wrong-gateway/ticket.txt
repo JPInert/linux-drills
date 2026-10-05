@@ -1,0 +1,8 @@
+From:     Site lead, Northgate Garage
+Priority: P2
+Box:      edge-nvr-03    (the install sheet is in your home directory)
+
+  "camera1 shows offline in the NVR. It was recording fine when we left
+   on Friday. Somebody swapped a switch over the weekend, that's all I know."
+
+You are `tech`, with sudo. The camera VLAN is 10.50.1.0/24.

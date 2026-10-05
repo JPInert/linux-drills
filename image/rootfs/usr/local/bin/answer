@@ -1,0 +1,5 @@
+#!/bin/bash
+# for diagnose-only tickets:  answer <what is wrong and what you'd do>
+[ $# -gt 0 ] || { echo "usage: answer <your diagnosis and next step, in a sentence>"; exit 1; }
+printf '%s\n' "$*" | sudo -n tee /var/lib/drill/answer >/dev/null
+echo "Recorded. Now run: check"

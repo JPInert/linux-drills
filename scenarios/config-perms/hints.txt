@@ -1,0 +1,3 @@
+The service keeps restarting. Ask it why it dies: this is about who may open a file, not the network or the GPU.
+Read the service's log with `sudo journalctl -u analytics` (-u = just this unit), then compare three things: which user runs the service, who owns the file, and what the file's mode lets that user do (`sudo ls -l FILE`, `id USER`).
+Try: sudo chgrp analytics /etc/analytics/analytics.conf  (give the file's group to the service)  ;  sudo chmod 640 /etc/analytics/analytics.conf  (owner read+write, group read, others nothing)  ;  sudo chmod 755 /etc/analytics  (the folder must be enterable)  ;  sudo systemctl restart analytics

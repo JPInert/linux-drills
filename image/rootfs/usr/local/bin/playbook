@@ -1,0 +1,48 @@
+#!/bin/bash
+# the first 60 seconds on ANY box: a fixed sweep before you change anything
+. /usr/local/lib/drill/ui.sh
+UI_C=$CYA
+sec() { ui_row "$B$MAG$1$R"; }
+cmd() {   # cmd "command" "what it tells you" ["flag note"...]   (texts <= 35 columns)
+  local c=$1 w=$2 n; shift 2
+  if [ ${#c} -gt 31 ]; then ui_row "  $WHT$c$R"; ui_row "$(printf '%34s' '')$D=>$R $w"
+  else ui_row "  $WHT$(printf '%-31s' "$c")$R $D=>$R $w"; fi
+  for n in "$@"; do ui_row "$(printf '%37s' '')$D$n$R"; done
+  return 0
+}
+render() {
+  ui_top "PLAYBOOK  first 60 seconds on any box" "look before you touch"
+  sec "1 CLUES"
+  cmd "ticket"                               "re-read it: names, IPs, 'since…'"
+  cmd "ls -la ~"                             "notes left for you (install sheet)"
+  sec "2 WHAT BROKE"
+  cmd "systemctl --failed"                   "units that died (red dot)"
+  cmd "sudo journalctl -p err -b | tail -20" "errors since boot, newest last" "-p err: errors only  -b: this boot"
+  sec "3 IS IT THE BOX"
+  cmd "uptime"                               "just rebooted? load average"
+  cmd "free -h"                              "RAM and swap left (-h: MB/GB)"
+  cmd "df -h"                                "a full filesystem? (Use% 100)"
+  cmd "df -i"                                "out of inodes? (IUse% 100)"
+  cmd "top"                                  "CPU/RAM hog? (M sorts by mem, q)"
+  sec "4 THE NETWORK"
+  cmd "ip a"                                 "my addresses; is the link UP?"
+  cmd "ip r"                                 "my routes: 'default via' = gateway"
+  cmd "sudo ss -tlnp"                        "who listens on which port" "-t TCP  -l listening" "-n numbers  -p program"
+  cmd "ping -c3 GATEWAY"                     "can I reach the gateway? (3 pings)"
+  sec "5 GPU + CONTAINERS"
+  cmd "nvidia-smi"                           "driver up? who holds GPU memory?"
+  cmd "sudo docker ps -a"                    "what runs, what exited or restarts" "-a: stopped ones too"
+  cmd "sudo docker logs --tail 20 NAME"      "its last 20 lines"
+  sec "THEN PULL THE THREAD  (X = the unit that looks wrong)"
+  cmd "systemctl status X"                   "state, main PID, last log lines"
+  cmd "sudo journalctl -u X -n 30"           "its last 30 log lines (-u unit)"
+  cmd "systemctl cat X"                      "the unit file systemd really uses"
+  cmd "sudo grep -ri WORD /etc/APP"          "where a setting lives" "-r every file below  -i any case"
+  ui_bot
+  printf '  %sSay: "Before I change anything: what failed, resources, network." Change ONE thing, then: check%s\n' "$D" "$R"
+}
+if [ -t 1 ]; then
+  render | less -RFX -Ps" playbook  (space = down   q = quit) "
+else
+  render
+fi

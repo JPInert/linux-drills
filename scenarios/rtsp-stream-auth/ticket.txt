@@ -1,0 +1,11 @@
+From:     Facilities tech support, Northgate Garage
+Priority: P2
+Box:      edge-nvr-03    (the install sheet is in your home directory)
+
+  "camera1 shows 'stream unavailable' in the vehicle-count dashboard since
+   last night's camera firmware update. The camera's web page still
+   loads fine from the NVR. Could the update have closed the video port?
+   Should we send someone to check the switch and the cable?"
+
+You are `tech`, with sudo. Get camera1's stream back into the analytics.
+Nobody can get to the camera itself today.

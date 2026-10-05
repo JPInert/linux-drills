@@ -1,0 +1,11 @@
+#!/bin/bash
+# drill lived-in noise: fwupd-refresh on an offline box. Always fails, never touches the network.
+case $1 in
+  refresh)
+    echo "Updating lvfs"
+    echo "Downloading…             [                                       ]"
+    echo "Failed to download https://cdn.fwupd.org/downloads/firmware.xml.gz.jcat: Could not resolve hostname"
+    exit 1 ;;
+  --version) echo "runtime   org.freedesktop.fwupd         1.8.12" ;;
+  *) echo "Failed to connect to daemon: Error calling StartServiceByName for org.freedesktop.fwupd: Unit fwupd.service not found." >&2; exit 1 ;;
+esac

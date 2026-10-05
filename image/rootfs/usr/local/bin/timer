@@ -1,0 +1,6 @@
+#!/bin/bash
+s=$(cat /var/lib/drill/start 2>/dev/null) || { echo "no active drill"; exit 1; }
+now=$(date +%s); d=$((now - s))
+printf 'elapsed %d:%02d' $((d / 60)) $((d % 60))
+[ -f /var/lib/drill/solved ] && printf '   (solved at %d:%02d)' $(( ($(cat /var/lib/drill/solved) - s) / 60 )) $(( ($(cat /var/lib/drill/solved) - s) % 60 ))
+printf '   hints used: %s\n' "$(cat /var/lib/drill/hints 2>/dev/null || echo 0)"

@@ -1,0 +1,3 @@
+The dashboard is not running. Ask systemd what state it is in (systemctl status dashboard), then read its log to find out WHY it failed to start.
+The log says "Address already in use": some other program already has port 8080. Find out which program and which PID (process number) owns it, and who started it.
+Run `sudo ss -tlnp | grep 8080` (t = TCP, l = listening, n = show numbers, p = show the program; sudo lets you see other users' programs), note the pid=, then `sudo kill PID`, check again, and only if it is still there `sudo kill -9 PID`. Then `sudo systemctl start dashboard` and `curl -s localhost:8080`.

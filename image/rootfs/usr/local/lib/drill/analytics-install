@@ -1,0 +1,21 @@
+#!/bin/bash
+# Baseline HEALTHY analytics service; scenarios source this then break something.
+# usage (root): /usr/local/lib/drill/analytics-install [--no-start]
+set -e
+id analytics >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -M analytics
+install -d -o analytics -g analytics /var/log/analytics
+install -d /etc/analytics
+install -d -o analytics -g analytics /run/mock-gpu
+cat > /etc/analytics/analytics.conf <<CONF
+# edge analytics - detect service
+LOG_LEVEL=INFO
+LOG_FILE=/var/log/analytics/detect.log
+DEVICE=cuda
+CAMERAS=4
+MODEL=/opt/analytics/models/person-vehicle.engine
+CONF
+chown root:analytics /etc/analytics/analytics.conf; chmod 640 /etc/analytics/analytics.conf
+install -m 0644 /opt/analytics/analytics.service /etc/systemd/system/analytics.service
+systemctl daemon-reload
+systemctl enable analytics >/dev/null 2>&1
+[ "${1:-}" = --no-start ] || systemctl start analytics

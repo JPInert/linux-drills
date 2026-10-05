@@ -1,0 +1,3 @@
+The modem belongs to the hub's Android, not to your laptop (`rfkill` only touches YOUR radios), so ask the hub through adb what its SIM and cellular link are doing.
+`adb shell getprop | grep gsm` shows the SIM state (NOT_READY = card is in but the modem is off, not missing). Then read the hub's two switches: `adb shell settings list global | grep airplane` and the same with `grep mobile_data` (1 = on, 0 = off).
+Run: adb shell cmd connectivity airplane-mode disable  (airplane off, the way that also wakes the radio)  ;  adb shell svc data enable  (mobile data on)  ;  then check the modem, not your command: adb shell getprop | grep gsm  (want LOADED and LTE)  and  adb shell ip -br a  (-br = brief; rmnet_data0 should get an address).

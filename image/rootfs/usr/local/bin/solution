@@ -1,0 +1,46 @@
+#!/bin/bash
+# the ideal path (Observe / Narrow / Act / Verify) + your weak-spot report
+S=/var/lib/drill
+if [ ! -f $S/solved ]; then
+  echo "You haven't passed 'check' yet. Viewing the solution logs this run as PEEKED."
+  read -r -p "Show it anyway? [y/N] " a
+  [[ $a == [yY]* ]] || exit 0
+  sudo -n touch $S/peeked
+fi
+
+# colour by line type, so the commands stand out from the talk around them. Every command line must survive a
+# copy + paste: no "$ " in front of it, and a note beside it becomes a "# comment" (bash ignores it).
+render() {
+  awk -v D=$'\033[2m' -v R=$'\033[0m' -v Y=$'\033[1;33m' -v C=$'\033[1;36m' \
+      -v G=$'\033[32m' -v W=$'\033[1;97m' -v M=$'\033[1;35m' '
+    # command, then any same-line note (gap of n+ spaces) as a dim # comment
+    function cmd(pre, s, gap,   i, c) { i = index(s, gap)
+      if (i && s !~ /\\$/) { c = substr(s, 1, i - 1); g = substr(s, i); match(g, /^ +/)
+        return pre W c R D substr(g, 1, RLENGTH) "# " substr(g, RLENGTH + 1) R }
+      return pre W s R }
+    cont                  { cont = ($0 ~ /\\$/); print W $0 R; next }   # a command continued with \
+    /^# /                 { print Y $0 R; next }
+    /^## /                { sf = 0; print C $0 R; next }
+    /^SAY:/               { say = 1; print G $0 R; next }
+    say && /^      /      { print G $0 R; next }
+                          { say = 0 }
+    /^$/                  { sf = 0; print; next }
+    /^ *\$ /              { match($0, /^ *\$ /); pre = substr($0, 1, RLENGTH - 2); body = substr($0, RLENGTH + 1)
+                            cont = (body ~ /\\$/); print cmd(pre "  ", body, "   "); next }
+    /^ *=>/               { print D $0 R; next }
+    match($0, /^(WEAK SPOT|LOCAL-FIRST|THE SHORT FORMS|TRAP|DO IT BETTER)/) {
+                            if ($0 ~ /^THE SHORT FORMS/) sf = 1
+                            print M substr($0, 1, RLENGTH) R substr($0, RLENGTH + 1); next }
+    sf && /^  [^ ]/       { cont = ($0 ~ /\\$/); print cmd("  ", substr($0, 3), "  "); next }
+                          { print }
+  ' /drill/solution.md
+  echo
+  drill-debrief
+}
+
+if [ -t 1 ]; then
+  # -F: no pager if it fits   -X: leave it on screen after q   -R: keep colours
+  render | less -RFX -Ps" solution  (space = down   b = back up   q = quit) "
+else
+  render
+fi

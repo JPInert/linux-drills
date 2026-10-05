@@ -1,0 +1,24 @@
+From:     Deployment lead, Northgate Garage
+Priority: P4
+Box:      edge-nvr-03   (you have never logged in to this one)
+
+  "Go-live call in 15 minutes. The install notes for this box are out of
+   date. Before the call, write down what it is actually running."
+
+NOTHING IS BROKEN (as far as anyone knows). Survey the box and report
+six facts, in exactly this form, all on one line, one word or number
+per field:
+
+   answer "gpu=<GPU model, e.g. T4> vram=<total GPU memory, MiB> cams=<N>
+           web=<port> failed=<unit> model=<file name>"
+
+   gpu     the GPU model name (one word is enough, e.g. T4 or L4)
+   vram    the card's TOTAL memory in MiB
+   cams    how many cameras the analytics service is configured for
+   web     the TCP port the NVR web UI (nvr-web) is listening on
+   failed  the name of the one systemd service that is in a failed state
+   model   the model file the analytics service is configured to load
+           (just the file name, e.g. something.engine)
+
+then:   check
+The values are regenerated every time you start this drill.

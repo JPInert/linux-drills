@@ -1,0 +1,15 @@
+From:     Site lead, Northgate Garage
+Priority: P3
+Box:      edge-nvr-03
+
+  "The NVR relay restarts itself on a timer. The runbook says the watchdog
+   interval is 30 seconds, but we measured something different. Somebody
+   edited a config in there last month and we don't know which file wins."
+
+DIAGNOSE ONLY. Find the setting WATCHDOG_INTERVAL that the NVR will
+actually use, and report the file, the line number and the value:
+
+   answer "file=/etc/nvr/... line=N value=N"       then:   check
+
+How the NVR reads config is written in /etc/nvr/README.
+The files are regenerated every time you start this drill.

@@ -1,0 +1,12 @@
+From:     Field service coordinator, Northgate Garage
+Priority: P2
+Box:      edge-nvr-03
+
+  "Since Tuesday night's config push our field techs get 'connection
+   refused' when they SSH to the box on port 22. It worked fine last
+   week. The network team says the VLAN and firewall are unchanged, and
+   the box answers ping. The techs are driving on site to do camera
+   installs because they can't get in remotely."
+
+You are `tech`, with sudo, on the box console (the one thing that still
+works). The site standard is SSH on port 22. Get remote access back.

@@ -1,0 +1,246 @@
+<title>Edge Box Field Card</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans+Condensed:wght@400;600;700&family=Martian+Mono:wdth,wght@75..112.5,400;75..112.5,600&family=JetBrains+Mono:wght@400;600&family=Red+Hat+Mono:wght@400;600&display=swap">
+<style>
+:root{
+  --ink:#16181d; --note:#4a4f5c; --rule:#c9ccd4; --band:#e9ebf0; --accent:#1d4f91; --warn:#9a2b1b; --bg:#ffffff;
+  color-scheme: light;
+  --fs:7.8pt; --mono:"IBM Plex Mono","Liberation Mono",monospace; --mstretch:100%; --mscale:0.95;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){ --ink:#e7e9ee; --note:#a3a9b6; --rule:#3a3f4a; --band:#23262d; --accent:#8db4ea; --warn:#f08a74; --bg:#15171b; color-scheme: dark; }
+}
+:root[data-theme="dark"]{ --ink:#e7e9ee; --note:#a3a9b6; --rule:#3a3f4a; --band:#23262d; --accent:#8db4ea; --warn:#f08a74; --bg:#15171b; color-scheme: dark; }
+
+@page{ size: letter landscape; margin: 0.25in; }
+*{ box-sizing:border-box; }
+body{ background:var(--bg); color:var(--ink); margin:0; padding-inline:16px; padding-block:12px;
+  font:var(--fs)/1.2 "IBM Plex Sans Condensed","Roboto Condensed","Liberation Sans Narrow",sans-serif; }
+header{ display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; border-bottom:1.5px solid var(--ink); padding-bottom:2px; margin-bottom:4px; }
+header h1{ font-size:10.5pt; font-weight:700; margin:0; letter-spacing:.02em; }
+header p{ margin:0; color:var(--note); }
+header .legend b{ font-family:var(--mono); }
+.halves{ display:grid; grid-template-columns:57fr 43fr; gap:10px; }
+.half{ min-width:0; }
+.net{ border-left:1.5px solid var(--ink); padding-left:8px; }
+.htag{ font-weight:700; font-size:7.6pt; letter-spacing:.08em; margin-bottom:2px; }
+.net .htag{ color:var(--accent); }
+.cols{ column-count:3; column-gap:9px; column-rule:0.5px solid var(--rule); }
+section{ break-inside:avoid; margin:0 0 3px; }
+h2{ font-size:calc(var(--fs) + 0.2pt); font-weight:700; text-transform:uppercase; letter-spacing:.06em; margin:0 0 1px;
+  background:var(--band); color:var(--accent); padding:1px 3px; }
+p{ margin:0; padding-left:9px; text-indent:-9px; }
+b,code{ font-family:var(--mono); font-stretch:var(--mstretch); font-weight:600; font-size:calc(var(--fs) * var(--mscale)); }
+code{ font-weight:400; }
+i{ color:var(--note); font-style:normal; }
+em{ color:var(--warn); font-style:normal; font-weight:600; }
+.sub{ color:var(--note); font-weight:600; margin-top:1px; padding-left:0; text-indent:0; }
+.cont{ padding-left:14px; text-indent:0; }
+.cont b{ font-weight:400; }
+b,code{ overflow-wrap:anywhere; }
+@media screen and (max-width: 700px){ .halves{ grid-template-columns:1fr; } .net{ border-left:0; padding-left:0; border-top:1.5px solid var(--ink); padding-top:6px; } .cols{ column-count:1; } body{ font-size:9pt; } b,code{ font-size:8.6pt; } }
+@media screen and (min-width: 701px) and (max-width: 1100px){ .halves{ grid-template-columns:1fr; } .net{ border-left:0; padding-left:0; } }
+@media print{ html,body{ height:8in; } body{ padding:0; display:flex; flex-direction:column; } .halves{ flex:1; min-height:0; } .half{ display:flex; flex-direction:column; min-height:0; } .cols{ flex:1; min-height:0; column-fill:auto; } }
+</style>
+
+<header>
+  <h1>Edge Box Field Card</h1>
+  <p class="legend"><b>bold</b> = type it · grey = what it means · <em>red</em> = trap · CAPS = your value · <b>| grep X</b> narrows any output</p>
+</header>
+
+<div class="halves">
+<div class="half"><div class="htag">SYSTEM · GPU · MODELS</div><div class="cols">
+<section><h2>First 60 s · look before you touch</h2>
+<p><i>1 clues:</i> <i>re-read the ticket</i> · <b>ls -la ~</b> <i>notes left for you</i></p>
+<p><i>2 broke:</i> <b>systemctl --failed</b> · <b>sudo journalctl -p err -b | tail -20</b></p>
+<p><i>3 box:</i> <b>uptime</b> <i>rebooted?</i> · <b>free -h</b> · <b>df -h</b> · <b>df -i</b> · <b>top</b></p>
+<p><i>4 net:</i> <b>ip a</b> · <b>ip r</b> · <b>sudo ss -tlnp</b></p>
+<p><i>5 gpu · apps:</i> <b>nvidia-smi</b> · <b>sudo docker ps -a</b></p>
+<p><i>then ONE thread:</i> <b>status X</b> → <b>journalctl -u X</b> → <b>cat X</b> → <b>grep -rl</b></p>
+<p><i>say:</i> "Before I change anything: what failed, resources, network." <em>look, then change ONE thing</em></p>
+</section>
+
+<section><h2>Files</h2>
+<p><b>ls -lah</b> · <b>ls -lt | head</b> <i>newest</i> · <b>cd -</b> · <b>cp -a</b> · <b>mv</b> · <b>rm -r</b> <em>no undo</em></p>
+<p><b>mkdir -p a/b</b> · <b>touch f</b> · <b>ln -s TARGET LINK</b></p>
+<p><b>find /etc /opt -iname '*NAME*' 2&gt;/dev/null</b> <i>name has it</i></p>
+<p><b>sudo grep -rl NAME /etc /opt</b> <i>which files mention it · &#8209;r every file below · &#8209;l names only</i></p>
+<p><b>command -v NAME</b> · <b>dpkg -S NAME</b></p>
+<p><b>find /var -xdev -size +100M</b> · <b>find DIR -mmin -30</b></p>
+</section>
+
+<section><h2>Read · search</h2>
+<p><b>cat</b> · <b>less</b> <i>/word n G q</i> · <b>head -20</b> · <b>tail -f</b> · <b>wc -l</b> · <b>diff</b></p>
+<p><b>grep WORD f</b> · <b>grep -r WORD DIR</b> <i>-r = every file in it</i></p>
+<p><b>-i</b> <i>any case</i> · <b>-v</b> <i>lines WITHOUT it</i> · <b>-c</b> <i>count</i> · <b>-n</b> <i>line numbers</i></p>
+<p><b>… | sort | uniq -c | sort -rn | head</b> <i>top N</i></p>
+</section>
+
+<section><h2>Edit · write</h2>
+<p><b>cp f f.bak</b> <i>first</i> · <b>nano f</b> <i>^O save ^X exit ^W find</i></p>
+<p><b>vim f</b> <i>i · Esc · :wq · :q! · /find · dd · u</i></p>
+<p><b>sed -i.bak 's/OLD/NEW/' f</b> · <b>sed -n '10,20p' f</b></p>
+<p><b>&gt;</b> <i>overwrite</i> · <b>&gt;&gt;</b> <i>append</i> · <b>2&gt;&amp;1</b> <i>+errors</i> · <b>| tee f</b> · <b>a | b</b></p>
+<p><b>a &amp;&amp; b</b> <i>if ok</i> · <b>a || b</b> <i>if not</i> · <b>$(cmd)</b> · <b>watch -n2 CMD</b></p>
+<p><b>echo X | sudo tee -a /etc/f</b> <em>not sudo echo &gt;</em></p>
+</section>
+
+<section><h2>Permissions · processes</h2>
+<p><b>chmod 640 f</b> <i>rwx=421</i> · <b>chown U:G f</b> · <b>id</b> · <b>namei -l /path</b></p>
+<p><b>sudo usermod -aG GRP USER</b> <i>re-login</i> · <em>never 777</em></p>
+<p><b>ps aux | grep NAME</b> <i>is it running, PID?</i> · <b>top</b> <i>P=cpu M=mem q</i></p>
+<p><b>kill PID</b> → <b>kill -9</b> · <em>kill ≠ rfkill</em> · <b>systemctl status PID</b> <i>owner</i></p>
+<p><b>sudo ss -tlnp | grep 8080</b> <i>who has the port</i></p>
+<p class="cont"><i>-t tcp · -l listening · -n numbers · -p program</i></p>
+<p><b>sudo lsof -i :8080</b> · <b>sudo lsof +L1</b> <i>deleted but open</i></p>
+</section>
+
+<section><h2>Services · logs</h2>
+<p><b>systemctl status X</b> · <b>sudo systemctl start|stop|restart X</b></p>
+<p><b>sudo systemctl enable --now X</b> · <b>disable --now X</b> <i>now + boot</i></p>
+<p><b>is-active X</b> · <b>is-enabled X</b> · <b>mask X</b> · <b>unmask X</b></p>
+<p><b>systemctl cat X</b> · <b>sudo systemctl edit X</b> · <b>daemon-reload</b> <em>after edits</em></p>
+<p><b>systemctl --failed</b> · <b>list-timers</b> · <em>Restart=always: kill won't stick</em></p>
+<p><em>port thread:</em> <b>sudo ss -tlnp | grep 8090</b> <i>empty = nothing listens</i> → <b>sudo grep -rl 8090 /etc /opt</b> <i>whose port</i> → <b>systemctl status X</b></p>
+<p><b>systemctl list-unit-files | grep disabled</b> <i>2nd col enabled = someone turned it off</i> · <em>&#8209;&#8209;failed misses "never started"</em></p>
+<p><b>sudo journalctl -u X -n 50</b> · <b>-f</b> · <b>-b</b> · <b>-p err</b> · <b>--since "1h ago"</b></p>
+<p><b>sudo dmesg -T | tail</b> <i>kernel: USB, disk, GPU Xid</i></p>
+<p><i>not found? a USER unit:</i> <b>systemctl --user status X</b></p>
+<p><i>units: /etc/systemd/system · /usr/lib/systemd/system · ~/.config/systemd/user</i></p>
+</section>
+
+<section><h2>Disks · devices · time</h2>
+<p><b>df -h</b> <i>WHICH fs</i> · <b>df -i</b> <i>inodes</i> · <em>never fdisk</em></p>
+<p><b>sudo du -sh /var/* | sort -h</b> <i>WHAT is big · -s total -h human</i></p>
+<p><b>lsblk -f</b> · <b>blkid</b> · <b>sudo mount /dev/sdb1 /mnt</b> · <b>mount -a</b></p>
+<p><b>truncate -s0 LOG</b> <i>not rm</i> · <b>journalctl --vacuum-size=500M</b></p>
+<p><b>lspci -nnk</b> <i>+driver</i> · <b>lsusb</b> · <b>lscpu</b> · <b>free -h</b> · <b>sensors</b></p>
+<p><b>lsmod | grep X</b> · <b>uname -r</b> · <b>cat /etc/os-release</b></p>
+<p><b>timedatectl</b> · <b>set-ntp true</b> <i>bad clock breaks TLS</i></p>
+</section>
+
+<section><h2>Packages · .deb</h2>
+<p><b>sudo apt update</b> · <b>apt install PKG</b> · <b>apt install ./f.deb</b></p>
+<p><b>dpkg -i f.deb</b> → <b>apt -f install</b> <i>fix deps</i> · <b>purge</b></p>
+<p><b>dpkg -l | grep X</b> · <b>apt policy PKG</b> · <b>dpkg -L PKG</b></p>
+</section>
+
+<section><h2>NVIDIA GPU</h2>
+<p><b>nvidia-smi</b> <i>bottom table = who uses the GPU + memory</i></p>
+<p><b>watch nvidia-smi</b> <i>refreshes every 2 s</i> · <b>nvidia-smi -L</b> <i>list</i></p>
+<p><b>lsmod | grep nvidia</b> · <b>dkms status</b> · <b>mokutil --sb-state</b></p>
+<p><b>systemctl status nvidia-persistenced</b> · <b>sudo ldconfig -p | grep cudart</b></p>
+<p><b>nvcc --version</b> <i>toolkit ≠ smi "CUDA Version"</i> · <b>CUDA_VISIBLE_DEVICES</b></p>
+<p><i>"can't communicate with driver" → module/Secure Boot</i></p>
+<p><i>CUDA out of memory → who holds VRAM · no process → CPU fallback</i></p>
+</section>
+
+<section><h2>Docker · GPU</h2>
+<p><b>docker ps -a</b> · <b>logs --tail 50 -f C</b> · <b>stats</b> · <b>exec -it C sh</b></p>
+<p><b>sudo docker inspect C | grep -i oom</b> <i>killed for memory?</i></p>
+<p><b>docker compose up -d</b> <i>recreates</i> · <em>restart keeps OLD config</em></p>
+<p><b>docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</b></p>
+<p><i>docker ps -a says Exited (137) = killed, often out of memory</i></p>
+</section>
+
+<section><h2>ollama · local models</h2>
+<p><b>ollama ps</b> <i>100% GPU = fits</i> · <b>ollama list</b> · <b>sudo journalctl -u ollama</b></p>
+<p><i>VRAM ≈ file + 1–2 GB · 8B Q4 5 GB · Q8 9 GB · 70B Q4 40 GB</i></p>
+</section>
+
+</div></div>
+<div class="half net"><div class="htag">NETWORK · REMOTE · DEVICES</div><div class="cols">
+<section><h2>Remote</h2>
+<p><b>ssh -p 2222 USER@HOST</b> · <b>scp f HOST:/tmp/</b> · <b>rsync -avP</b></p>
+<p><b>tmux new -s fix</b> · <b>Ctrl-b d</b> · <b>tmux a -t fix</b> <i>survives drops</i></p>
+<p><b>aws ssm start-session --target i-ID</b> · <b>Ctrl-r</b> <i>history</i></p>
+</section>
+
+<section><h2>Look</h2>
+<p><b>ip -br a</b> · <b>ip -br link</b> · <b>ip r</b> · <b>ip neigh</b> <i>ARP</i></p>
+<p><b>ip route get IP</b> <i>which way out</i> · <b>ethtool eth0</b> <i>speed, duplex</i></p>
+<p><b>ping -c 3 GW</b> <i>-c 3 = 3 tries</i> → <b>ping TARGET</b> → <b>traceroute TARGET</b></p>
+<p><b>dig NAME +short</b> · <b>dig @SERVER NAME</b> · <b>getent hosts NAME</b></p>
+<p><b>resolvectl status</b> · <b>nc -zv HOST PORT</b> <i>port open?</i></p>
+<p><b>sudo tcpdump -i eth0 port 554</b> <i>watch traffic, Ctrl-C</i></p>
+<p><b>nmap -sn 10.50.1.0/24</b> <i>who's alive · -sn = no port scan</i></p>
+<p><b>iperf3 -c HOST</b> <i>throughput</i></p>
+</section>
+
+<section><h2>Subnets</h2>
+<p><i>/24 = .255.0 = 254 hosts · /25 126 · /26 62 · /27 30 · /28 14 · /30 2</i></p>
+<p><i>private 10/8 · 172.16/12 · 192.168/16 · 169.254 = no DHCP</i></p>
+<p><i>same subnet → direct (ARP) · other → gateway</i></p>
+</section>
+
+<section><h2>Change now (gone at reboot)</h2>
+<p><b>sudo ip addr add 10.0.0.5/24 dev eth0</b> · <b>del</b> · <b>flush dev eth0</b></p>
+<p><b>sudo ip link set eth0 up|down</b></p>
+<p><b>sudo ip route replace default via 10.0.0.1</b></p>
+<p><b>sudo dhclient -r eth0; sudo dhclient -v eth0</b></p>
+<p><b>ip link add link eth0 name eth0.30 type vlan id 30</b></p>
+</section>
+
+<section><h2>Change for good</h2>
+<p><b>nmcli dev status</b> · <b>nmcli con show</b></p>
+<p><b>sudo nmcli con mod "NAME" ipv4.method manual</b></p>
+<p class="cont"><b>ipv4.addresses 10.0.0.5/24 ipv4.gateway 10.0.0.1</b></p>
+<p class="cont"><b>ipv4.dns "10.0.0.1"</b> → <b>nmcli con up "NAME"</b></p>
+<p><b>ipv4.method auto</b> <i>back to DHCP</i></p>
+<p><b>netplan try</b> <i>/etc/netplan, auto-reverts</i> · <b>netplan apply</b></p>
+<p><b>ifdown eth0; ifup eth0</b> <i>/etc/network/interfaces</i></p>
+</section>
+
+<section><h2>WiFi</h2>
+<p><b>nmcli dev wifi list</b> · <b>nmcli dev wifi connect "SSID" --ask</b></p>
+<p><b>iw dev wlan0 link</b> <i>signal</i> · <b>rfkill list</b> <i>blocked?</i></p>
+<p><i>-50 great · -67 ok for video · -75 bad · 2.4 GHz ch 1/6/11</i></p>
+</section>
+
+<section><h2>DHCP</h2>
+<p><b>sudo tcpdump -i eth0 port 67 or port 68</b></p>
+<p><i>DISCOVER, no OFFER = nobody answering</i></p>
+<p><i>wrong VLAN · no relay (ip helper-address) · scope full</i></p>
+<p><i>camera needs a fixed IP → reserve by MAC</i></p>
+</section>
+
+<section><h2>Switch (Cisco IOS)</h2>
+<p><b>show ip int brief</b> · <b>show int status</b> · <b>show vlan brief</b></p>
+<p><b>show int trunk</b> · <b>show cdp neighbors</b> · <b>show lldp neighbors</b></p>
+<p><b>show mac address-table | include 1a2b</b> <i>→ port</i></p>
+<p><b>show power inline</b> <i>PoE per port, budget</i></p>
+<p><b>conf t</b> → <b>int Gi1/0/5</b> → <b>switchport mode access</b></p>
+<p class="cont"><b>switchport access vlan 30</b> → <b>no shut</b> → <b>end</b> → <b>wr</b></p>
+<p><b>power inline never</b> → <b>auto</b> <i>PoE bounce a camera</i></p>
+</section>
+
+<section><h2>Firewall · NAT</h2>
+<p><b>sudo ufw status</b> · <b>ufw allow 22/tcp</b> · <b>nft list ruleset</b></p>
+<p><b>sudo iptables -L -n -v</b> · <b>-t nat -L -n -v</b> <i>port forwards</i></p>
+<p><i>forward = DNAT · PAT = many share one IP · test from OUTSIDE</i></p>
+</section>
+
+<section><h2>Cameras · RTSP</h2>
+<p><b>nc -zv CAM 554</b> · <b>curl -v http://CAM/</b></p>
+<p><b>ffprobe rtsp://USER:PASS@CAM/PATH</b> <i>stream info = it works</i></p>
+<p><i>401 login · 404 path · refused port · timeout network</i></p>
+<p><i>RTSP sets up · RTP carries video</i></p>
+</section>
+
+<section><h2>APIs</h2>
+<p><b>curl -sv URL</b> · <b>-k</b> <i>skip cert</i> · <b>-H "Authorization: Bearer $T"</b></p>
+<p><b>curl -s URL | jq .</b> <i>or python3 -m json.tool</i></p>
+<p><i>401 token · 403 not allowed · 404 path · 5xx device side</i></p>
+<p><i>curl exit 6 DNS · 7 refused · 28 timeout · 60 cert</i></p>
+</section>
+
+<section><h2>Out-of-band · monitoring</h2>
+<p><b>ipmitool -I lanplus -H IP -U USER chassis status</b></p>
+<p><b>screen /dev/ttyUSB0 115200</b> <i>serial console</i></p>
+<p><i>OOB = the way in when the network is broken. Test at install.</i></p>
+<p><b>systemctl status amazon-ssm-agent</b> <i>443 out + clock</i></p>
+<p><b>curl -s :9100/metrics | head</b> <i>Grafana blank → exporter first</i></p>
+</section>
+</div></div>
+</div>
+

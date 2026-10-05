@@ -1,0 +1,14 @@
+From:     Tier 1 NOC (monitoring)
+Priority: P3
+Box:      edge-nvr-03, Northgate Garage
+
+  "Every panel on the Northgate Garage edge-box dashboard says 'No data'
+   since the monitoring stack update yesterday. Grafana itself loads
+   fine at http://edge-nvr-03:3000 and we can log in. We think the
+   update broke the metrics collector, or the site firewall is blocking
+   something new."
+
+You are `tech`, with sudo. Get the dashboards showing data again. The
+NOC's central server also pulls this box's metrics from its usual port,
+so don't move anything it depends on. Whatever you change must survive
+a reboot.

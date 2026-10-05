@@ -1,0 +1,48 @@
+#!/usr/bin/python3
+# gpu-fan: site helper (NVML fan control) installed with the quiet-mode change.
+#   gpu-fan              show the fan policy
+#   gpu-fan --max PCT    cap the fan at PCT % (manual policy)
+#   gpu-fan --auto       give the fan back to the driver's automatic curve
+# (drill: it writes the mock card's /run/mock-gpu/card.state, which nvidia-smi reads)
+import json, os, sys
+
+CARD = "/run/mock-gpu/card.state"
+
+
+def load():
+    try:
+        with open(CARD) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save(d):
+    os.makedirs("/run/mock-gpu", exist_ok=True)
+    with open(CARD + ".tmp", "w") as f:
+        json.dump(d, f)
+    os.chmod(CARD + ".tmp", 0o644)
+    os.replace(CARD + ".tmp", CARD)
+
+
+a = sys.argv[1:]
+d = load()
+if not a:
+    m = d.get("fan_max")
+    print("GPU 0 fan policy: %s" % ("manual, capped at %d%%" % m if m is not None
+                                    else "automatic (driver fan curve)"))
+    sys.exit(0)
+if os.geteuid() != 0:
+    print("gpu-fan: NVML: Insufficient Permissions (run as root)", file=sys.stderr)
+    sys.exit(4)
+if a[0] == "--auto":
+    d["fan_max"] = None
+    save(d)
+    print("GPU 0 fan policy: automatic (driver fan curve)")
+elif a[0] == "--max" and len(a) > 1 and a[1].isdigit() and 0 < int(a[1]) <= 100:
+    d["fan_max"] = int(a[1])
+    save(d)
+    print("GPU 0 fan policy: manual, capped at %d%%" % int(a[1]))
+else:
+    print("usage: gpu-fan [--auto | --max PCT]", file=sys.stderr)
+    sys.exit(2)

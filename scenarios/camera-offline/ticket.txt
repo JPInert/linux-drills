@@ -1,0 +1,10 @@
+From:     Site lead, Northgate Garage
+Priority: P2
+Box:      edge-nvr-03    (the install sheet is in your home directory)
+
+  "camera1 is offline in the NVR since this morning. Everything else on
+   the box looks normal to us. Should we reboot the NVR?"
+
+DIAGNOSE ONLY. Work out whether this box is at fault and what should
+happen next. When you know, run:   answer "<what is wrong, and who does what>"
+then run:   check

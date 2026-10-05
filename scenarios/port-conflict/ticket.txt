@@ -1,0 +1,10 @@
+From:     Site lead, Northgate Garage
+Priority: P2
+Box:      edge-nvr-03
+
+  "The camera dashboard on port 8080 is down. Our guards can't see the
+   grid. Somebody restarted the box last night for updates and it hasn't
+   come back. Can you look?"
+
+You are `tech`, with sudo. The dashboard MUST end up on :8080 (the wall
+displays and the mobile app are hard-wired to it: do not change the port).

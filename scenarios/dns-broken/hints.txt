@@ -1,0 +1,3 @@
+The IP works but the name doesn't: that is name resolution (DNS), not the network. Which DNS server is this box asking, and is it the right one? The install sheet in your home folder says which one it should be.
+The box's DNS server is set in /etc/resolv.conf. Read it, then use dig to ask the CORRECT server from the install sheet directly: if that server answers, the server is fine and only this box's setting is wrong.
+Run: cat /etc/resolv.conf, then dig @10.50.0.254 camera1.facility.lan +short (@ = ask this server, +short = print only the answer). Fix it with sudo nano /etc/resolv.conf and change the nameserver line (sed -i fails here: resolv.conf is a Docker mount; nano edits in place).

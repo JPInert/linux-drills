@@ -1,0 +1,11 @@
+From:     Operations manager, Northgate Garage (via the Tier 1 desk)
+Priority: P1
+Box:      edge-nvr-03    (the install sheet is in your home directory)
+
+  "The sensor dashboard (bed-exit and door sensors) has been blank since
+   IT 'standardised' the network settings on the edge box yesterday.
+   The cameras are all fine. The sensor vendor says their hubs are
+   online and blames our Wi-Fi. We are doing bed checks by hand."
+
+You are `tech`, with sudo. Get the sensor dashboard back, and make sure
+it is still back after the box's next reboot.

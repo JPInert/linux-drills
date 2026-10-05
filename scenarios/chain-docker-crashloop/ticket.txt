@@ -1,0 +1,14 @@
+From:     Night shift supervisor, Northgate Garage (level 2 deck)
+Priority: P1
+Box:      edge-nvr-03  (vehicle counting + NVR)
+
+  "We have had NO fall alerts since about 3 AM. Not late, none at all.
+   The NOC says the box is online and green on their dashboard, and the
+   station monitors still show live video. One of the hallway cameras
+   has been glitchy all week, could that be it? The vendor's update
+   ran overnight again."
+
+You are `tech`, with sudo. Get fall alerts working again. Stay on the
+new release and its new model: the vendor says it cuts night-time false
+alarms, so do not roll either back. Whatever you change must survive a
+reboot, and tell us what to raise with the vendor.

@@ -1,0 +1,8 @@
+From:     Installer on site (texting)
+Priority: P2
+Box:      edge-nvr-03    (the install sheet is in your home directory)
+
+  "Rebooted the NVR after the power blip and now camera1 won't connect.
+   I can ping it fine. The camera's web page just says 403 Forbidden."
+
+You are `tech`, with sudo. Nobody has touched the camera.

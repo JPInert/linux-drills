@@ -1,0 +1,9 @@
+From:     Site lead, Northgate Garage
+Priority: P3
+Box:      edge-nvr-03    (the install sheet is in your home directory)
+
+  "The NVR software is configured with camera1.facility.lan and says the
+   host can't be found. The IP address 10.50.1.31 works fine when I type it
+   in. This started after the network guy 'cleaned up' some settings."
+
+You are `tech`, with sudo.

@@ -1,0 +1,12 @@
+From:     Site lead, Northgate Garage
+Priority: P2
+Box:      edge-nvr-03
+
+  "The vendor pushed the feed-relay update yesterday and now it won't
+   come up. Every time we restart it, it fails again straight away and
+   the guard station shows 'no feeds'. The vendor says they redeployed
+   the files from a zip on a laptop, and that it works fine on theirs."
+
+You are `tech`, with sudo. `feedrelay.service` must be running under
+systemd (the monitoring watches the unit, so do not run it by hand),
+still enabled for boot, and answering on :8091.

@@ -1,0 +1,20 @@
+#!/bin/sh
+# netfilter-persistent (cut-down copy of Debian's iptables-persistent helper, IPv4 only)
+#   start|restart|reload  load /etc/iptables/rules.v4
+#   save                  write the LIVE rules to /etc/iptables/rules.v4
+#   flush                 remove all rules (policies to ACCEPT)
+#   stop                  does nothing (the rules stay loaded)
+RULES=/etc/iptables/rules.v4
+case "$1" in
+  start|restart|reload|force-reload)
+    [ -f "$RULES" ] || { echo "run-parts: $RULES not found" >&2; exit 1; }
+    iptables-restore < "$RULES" || { echo "netfilter-persistent: iptables-restore of $RULES failed" >&2; exit 1; }
+    echo "netfilter-persistent: loaded $RULES" ;;
+  save)
+    iptables-save > "$RULES.new" && mv "$RULES.new" "$RULES" && chmod 0640 "$RULES"
+    echo "netfilter-persistent: saved the live rules to $RULES" ;;
+  flush)
+    iptables -F; iptables -X; iptables -P INPUT ACCEPT; iptables -P FORWARD ACCEPT; iptables -P OUTPUT ACCEPT ;;
+  stop) : ;;
+  *) echo "Usage: $0 {start|restart|reload|force-reload|save|flush}" >&2; exit 1 ;;
+esac

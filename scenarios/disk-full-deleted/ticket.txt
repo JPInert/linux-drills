@@ -1,0 +1,12 @@
+From:     NOC monitoring (auto) + site lead
+Priority: P2
+Box:      edge-nvr-03  (NVR at the Northgate Garage site)
+
+  "The /var/log disk alert has been firing since last night. Yesterday
+   someone found a huge poll.log and deleted it, but the alert never
+   cleared. I checked the folder sizes today and the whole log folder
+   is only a few megabytes, yet the monitor still says 100%. The camera
+   poller is throwing write errors and the camera status page is stale."
+
+You are `tech`, with sudo. Get the disk healthy and stop it filling
+again. The camera poller must stay running.

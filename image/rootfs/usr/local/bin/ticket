@@ -1,0 +1,28 @@
+#!/bin/bash
+# reshow the ticket for this drill: a card for the header lines, then the ticket body as written
+[ -f /drill/ticket.txt ] || { echo "no active drill"; exit 1; }
+. /usr/local/lib/drill/ui.sh
+T=/drill/ticket.txt
+inc="INC-$(cksum < /var/lib/drill/scenario | cut -d' ' -f1 | tail -c 6)"
+opened=$(date -d "@$(cat /var/lib/drill/start 2>/dev/null || date +%s)" +%H:%M 2>/dev/null)
+site=''; grep -q 'Northgate Garage' "$T" && site='Northgate Garage'
+prio=$(sed -n 's/^Priority:[[:space:]]*//p' "$T" | head -1)
+case $prio in P1*) UI_C=$RED ;; P2*) UI_C=$ORG ;; P3*) UI_C=$YEL ;; *) UI_C=$CYA ;; esac
+
+# header = the leading "Key:  value" lines, up to the first blank line
+hdr=$(awk 'NF==0{exit} /^[A-Z][A-Za-z -]*:/' "$T")
+# anything else before that blank line (a free-text note under Box:) goes above the body
+body=$(awk 'f{print; next} NF==0{f=1; if (x) print ""; next} !/^[A-Z][A-Za-z -]*:/{print; x=1}' "$T")
+[ -n "$hdr" ] || body=$(cat "$T")
+
+echo
+ui_top "TICKET $inc${site:+  ·  $site}" "opened ${opened:-now}"
+if [ -n "$prio" ]; then ui_row "$(printf '%-9s' Priority)$(ui_prio "$prio")"; fi
+while IFS= read -r ln; do
+  [ -n "$ln" ] || continue
+  k=${ln%%:*}; v=$(printf '%s' "${ln#*:}" | sed 's/^[[:space:]]*//')
+  [ "$k" = Priority ] && continue
+  ui_wrap "$(printf '%-10s' "$k")" "$v" "$([ "$k" = Box ] && printf '%s' "$B")"
+done <<< "$hdr"
+ui_bot
+printf '%s\n' "$body"

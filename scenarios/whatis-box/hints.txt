@@ -1,0 +1,3 @@
+Nothing is broken: this is the sweep you do in the first five minutes on any box. Each field needs a different question: the GPU, the services systemd runs, the ports that listen, and the analytics config.
+nvidia-smi answers the GPU fields (read the Memory-Usage column: used / TOTAL). systemctl lists running and failed services. ss lists listening ports with the program behind each (needs sudo to show the program). The analytics config is readable only with sudo.
+Run: nvidia-smi  ;  systemctl --failed  ;  sudo ss -tlnp | grep nvr-web  (-t TCP, -l listening, -n numbers, -p program)  ;  sudo grep -E 'CAMERAS|MODEL' /etc/analytics/analytics.conf  (-E = match either word)  ;  ls -l /opt/analytics/models  (the newest file is not necessarily the one in use).

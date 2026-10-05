@@ -1,0 +1,13 @@
+From:     Site lead, Northgate Garage
+Priority: P3
+Box:      edge-nvr-03
+
+  "We re-addressed the cameras on Tuesday. The NVR still shows the OLD
+   camera list and two cameras read as offline, but the camera vendor
+   says the cameras are fine at their new addresses. The camera sync is
+   supposed to refresh the list every 15 minutes and it hasn't run since
+   last week. Somebody was in there troubleshooting on Monday and nobody
+   wrote down what they did."
+
+You are `tech`, with sudo. The camera sync (`feedrelay-sync`) has to run
+NOW to catch up, and be back on its normal 15-minute schedule.

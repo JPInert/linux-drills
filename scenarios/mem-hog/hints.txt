@@ -1,0 +1,3 @@
+Stutter on a healthy link often means the box itself is short of something. Rule the network out in ten seconds (ping the gateway), then look at memory: which single program is holding the most?
+Look per program, not at the box totals: run `top` and press M (capital M, Shift+m) to sort by memory. Read the RES column (kilobytes really in RAM); %MEM is measured against the host's RAM here and looks tiny.
+`ip route` (the IP after "default via" is the gateway), `ping -c 3 GATEWAY` (-c 3 = send 3 and stop), then `top` + M; `ps aux | grep motion` shows the full command; `systemctl status motion-buffer` and `cat /etc/motion-buffer.conf` say why it is so big. Then `sudo systemctl stop motion-buffer` (leave analytics alone) and look at top again.

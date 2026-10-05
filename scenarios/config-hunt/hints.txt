@@ -1,0 +1,3 @@
+Don't guess from the first file you open: read /etc/nvr/README for the loading rules, then find every file that mentions WATCHDOG_INTERVAL.
+`grep -rn WATCHDOG_INTERVAL /etc/nvr /etc/default` lists every hit (-r = search inside every file under those folders, -n = show the line number). Now cross out what the README says the loader skips: # comments, look-alike keys like WATCHDOG_INTERVAL_MAX, and files not ending in .conf.
+Search only the files the loader reads, in the order it reads them: grep -n '^WATCHDOG_INTERVAL=' /etc/nvr/nvr.conf /etc/nvr/conf.d/*.conf  (^ = the line starts with it, *.conf = only .conf files, listed in name order). The LAST line printed wins: answer with its file, line number and value.

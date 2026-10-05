@@ -1,0 +1,3 @@
+#!/bin/bash
+# did you actually fix it?
+exec sudo -n /usr/local/lib/drill/run-check

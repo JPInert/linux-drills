@@ -1,0 +1,91 @@
+#!/bin/bash
+# weak-spot report from the shell history; runs as any user (root sees root's history too)
+S=/var/lib/drill
+# both users' history, in the order typed (HISTTIMEFORMAT writes a #epoch line before each command)
+files=(); for f in /home/tech/.bash_history /root/.bash_history; do [ -r "$f" ] && files+=("$f"); done
+hist=$([ ${#files[@]} -gt 0 ] && awk 'FNR==1{t=0} /^#[0-9]+$/{t=substr($0,2); next}
+  {sub(/^[[:space:]]+/, "")} NF{printf "%s\t%09d\t%s\n", t, NR, $0}' "${files[@]}" \
+  | sort -t$'\t' -k1,1n -k2,2n | cut -f3-)
+# strip "sudo [-flags]" prefix so "sudo fdisk -l" counts as fdisk
+cmds=$(printf '%s\n' "$hist" | sed -E 's/^sudo( +-[A-Za-z-]+( +[^ -][^ ]*)?)* +//' | grep -vE '^(ticket|hint|check|solution|playbook|timer|answer|next|clear|history|exit|drill-debrief)( |$)')
+first_of() { printf '%s\n' "$cmds" | grep -nE "^($1)( |\$)" | head -1 | cut -d: -f1; }
+net='ping|ping6|traceroute|tracepath|dig|nslookup|host|nc|ncat|curl|wget|ssh|telnet|mtr|tcpdump|arping'
+loc='systemctl|journalctl|df|du|ss|lsof|top|ps|free|uptime|ls|cat|tail|less|id|whoami|dmesg|pgrep|fuser|stat|find|grep|nvidia-smi|adb|ip|docker|iptables|nft|ethtool|timedatectl|getent|nmcli|iw|resolvectl|bridge|systemd-analyze'
+fnet=$(first_of "$net"); floc=$(first_of "$loc")
+
+n() { printf '%s\n' "$cmds" | grep -cE "$1"; }
+line() { printf '%s\n' "$2" | fold -s -w 62 | awk -v k="$1" 'NR==1{printf "  %-12s %s\n", k, $0; next} {printf "  %-12s %s\n", "", $0}'; }   # wrap under column 2
+
+printf '\033[1mWEAK-SPOT REPORT\033[0m  (from your shell history, %s commands)\n' "$(printf '%s\n' "$cmds" | grep -c .)"
+line "first cmds" "$(printf '%s\n' "$cmds" | head -6 | cut -c1-40 | paste -sd'\t' | sed 's/\t/  ;  /g')"
+
+if [ -n "$fnet" ] && { [ -z "$floc" ] || [ "$fnet" -lt "$floc" ]; }; then
+  line "local-first" "WATCH: a network tool came before any local check. Ask 'is it the BOX?' first: systemctl, df, ss, top."
+elif [ -n "$fnet" ]; then
+  line "local-first" "good: local checks came first."
+else
+  line "local-first" "good: never needed the network tools."
+fi
+
+c=$(n '^(fdisk|parted|cfdisk|sfdisk|gdisk)( |$)')
+[ "$c" -gt 0 ] && line "disk tools" "WATCH: partition tool x$c. fdisk/parted edit PARTITIONS. Full disk = df -h (which fs) then du (what)."
+c=$(n '^rfkill( |$)')
+[ "$c" -gt 0 ] && line "rfkill" "WATCH: rfkill x$c toggles THIS machine's wifi/bluetooth radios. To stop a process: kill PID / systemctl stop. For a device's radio: that device's own tools or API."
+# sweep: the playbook's first looks, counted up to the first command that CHANGES something
+chg='^(systemctl( +-[^ ]+)* +(stop|start|restart|reload|enable|disable|edit|mask|unmask|kill|daemon-reload)'
+chg+='|kill|pkill|killall|chmod|chown|chgrp|rm|mv|truncate|vi|vim|vim\.tiny|nano|editor|sudoedit'
+chg+='|ip +(-[^ ]+ +)*(r|ro|route|a|addr|address) +(add|del|delete|replace|change|flush)|ip +(-[^ ]+ +)*link +set'
+chg+='|iptables( +-t +[a-z]+)? +-[ADIRFPN]|nft +(add|delete|flush|insert|replace)'
+chg+='|docker +(restart|stop|start|rm|kill|run)|docker +compose .*(up|restart|rm|down|stop|start|kill))( |$)'
+chg+='|^sed( .*)? -[a-zA-Z]*i|^sed .*--in-place|[|] *(sudo +)?tee( |$)'
+c1=$(printf '%s\n' "$cmds" | grep -nE "$chg" | head -1 | cut -d: -f1)
+before=$(printf '%s\n' "$cmds" | head -n $(( ${c1:-100000} - 1 )))
+seen=()
+for kv in 'failed/status:^systemctl( +-[^ ]+)* +(--failed|list-units|status)' 'journalctl:^journalctl' \
+          'top/ps:^(top|ps|pgrep)( |$)' 'df:^df( |$)' 'ip a/r:^ip +(-[^ ]+ +)*(a|ad|addr|address|r|ro|route)( |$)' \
+          'ss:^ss( |$)' 'nvidia-smi:^nvidia-smi' 'docker ps:^docker +(ps|container +ls)( |$)'; do
+  printf '%s\n' "$before" | grep -qE "${kv#*:}" && seen+=("${kv%%:*}")
+done
+ns=${#seen[@]}; list=$(IFS=,; printf '%s' "${seen[*]}" | sed 's/,/, /g')
+if [ -z "$c1" ]; then
+  line "sweep" "$ns/8 first looks, and no change command at all${list:+ ($list)}."
+elif [ "$ns" -lt 3 ]; then
+  line "sweep" "WATCH: $ns/8 first looks before your first change ('$(printf '%s\n' "$cmds" | sed -n "${c1}p" | cut -c1-30)')${list:+: $list}. Run 'playbook' first: failed units, errors, top, df, ss take a minute."
+else
+  line "sweep" "good: $ns/8 first looks before your first change: $list."
+fi
+
+k1=$(first_of 'kill|pkill|killall')
+if [ -n "$k1" ]; then
+  if printf '%s\n' "$cmds" | sed -n "${k1}p" | grep -qE ' -(9|KILL|SIGKILL)'; then
+    line "kill" "WATCH: your first kill was -9. Plain 'kill PID' first, confirm it exited (ss/ps), THEN -9. Say why."
+  elif [ "$(n '^(kill|pkill|killall)( +-(9|KILL|SIGKILL))')" -gt 0 ]; then
+    line "kill" "good: TERM first, -9 only once it ignored you."
+  fi
+fi
+c=$(n 'chmod( +-R)? +0?777')
+[ "$c" -gt 0 ] && line "chmod 777" "WATCH: x$c. Never the answer. Fix the owner/group (chown/chgrp) and use the least mode that works."
+c=$(n '^rm( +-[a-zA-Z]+)* +[^ ]*\.log')
+[ "$c" -gt 0 ] && line "rm on log" "x$c. rm on a log that a daemon holds open frees NOTHING; truncate -s0 it, or find it with 'lsof +L1'."
+
+if [ -s $S/typos ]; then
+  echo "  typos:"
+  sort $S/typos | uniq -c | sort -rn | while read -r k w; do
+    case $w in
+      ldisk|lsdisk|lsopen|lof|lsoff) m="lsof = LiSt Open Files (ports too: lsof -i :PORT). lsblk = block devices." ;;
+      ifconfig)  m="ip a   (addresses)   ip r   (routes)" ;;
+      netstat)   m="ss -ltnp   (listening TCP + process)" ;;
+      route)     m="ip r" ;;
+      arp)       m="ip neigh" ;;
+      service)   m="systemctl status|start|enable NAME" ;;
+      ipconfig)  m="that's Windows. ip a" ;;
+      nvidia)    m="nvidia-smi" ;;
+      systectl|sytemctl|systemclt|systemct) m="systemctl  (SYSTEM-CTL: tab-completes after 'systemc')" ;;
+      journalclt|jounalctl|journctl) m="journalctl  (JOURNAL-CTL)" ;;
+      *)         m="see CHEATSHEET.md" ;;
+    esac
+    printf '    %sx  %-12s -> %s\n' "$k" "$w" "$m"
+  done
+fi
+h=$(cat $S/hints 2>/dev/null || echo 0)
+line "hints" "$h used"

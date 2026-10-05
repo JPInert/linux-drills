@@ -1,0 +1,12 @@
+From:     Site lead, Northgate Garage
+Priority: P2
+Box:      edge-nvr-03
+
+  "The live video on the wall displays keeps stuttering and freezing, and
+   the mobile app says 'network unstable'. We already swapped the switch
+   and two patch cables and it made no difference. It got worse after
+   Tuesday's update."
+
+You are `tech`, with sudo. Find the real cause and fix it. Analytics must
+keep running (detections are contractual). Motion clips can be down until
+the vendor call on Monday.

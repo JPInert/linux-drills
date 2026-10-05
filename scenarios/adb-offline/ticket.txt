@@ -1,0 +1,12 @@
+From:     Provisioning desk, Northgate Garage onboarding
+Priority: P3
+Box:      site-laptop-02  (your laptop; the new hub is on the site LAN at 10.50.0.77)
+
+  "The new Facility Hub won't show up in the provisioning tool. There is
+   no USB cable at this site, so it has to be reached over the network.
+   The hub's LED is solid green and it answers a ping, but the tool says
+   'no device found'. It was showing up fine this morning, then somebody
+   power-cycled the hub during a rack tidy. Looks like a network problem."
+
+You are `tech`, with sudo. The provisioning tool drives the hub through the
+Android debug bridge on this laptop. Get the hub attached and usable from here.

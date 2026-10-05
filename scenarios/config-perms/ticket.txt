@@ -1,0 +1,12 @@
+From:     NOC monitoring (auto) + site lead
+Priority: P2
+Box:      edge-nvr-03  (analytics + NVR at the Northgate Garage site)
+
+  "Detections are dropping in and out of the dashboard. The analytics
+   service restarts itself every few seconds. It worked until yesterday,
+   when the camera contractor added the camera login to its config file
+   and 'locked it down'."
+
+You are `tech`, with sudo. Get analytics running and staying up. That
+config now holds the camera password: it must NOT end up readable or
+writable by everyone.

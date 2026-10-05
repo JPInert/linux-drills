@@ -1,0 +1,16 @@
+From:     Site lead, Northgate Garage
+Priority: P3
+Box:      edge-nvr-03
+
+  "camera7, the WiFi one in the dining room, keeps going offline for a
+   minute or two, many times a day. The wired cameras are fine. It has
+   been like this for days. Is the camera dying? Should we order a
+   replacement?"
+
+DIAGNOSE ONLY. Work out why camera7 drops and who should fix it. Then:
+
+   answer "<the cause, the number that proves it, who does what>"
+   check
+
+Plain words are fine: check looks for the facts (the cause and the
+number behind it, and the next step), not for exact wording.

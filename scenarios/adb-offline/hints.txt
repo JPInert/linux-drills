@@ -1,0 +1,3 @@
+Ask adb itself, not the network: run `adb devices` and read the second column (the STATE). A hub that answers ping can still be "offline" in adb's own list.
+"offline" means adb's background server is holding a stale entry; `adb connect` on it only says "already connected". Restart that server with `adb kill-server`, then add the hub back by hand with `adb connect` (network hubs are never found automatically).
+Run: adb kill-server  (stops adb's server; the next adb command starts a fresh one)  ;  adb connect 10.50.0.77  (port 5555 is assumed)  ;  adb devices  (STATE must say "device")  ;  adb shell getprop ro.product.model  (runs a command ON the hub to prove it answers).

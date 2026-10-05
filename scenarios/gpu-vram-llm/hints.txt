@@ -1,0 +1,3 @@
+Analytics is running, just slow. Ask the GPU who is using it and how much memory they hold, and ask the analytics log why it is not on the GPU.
+nvidia-smi's Processes table (at the bottom) shows the PID holding the memory. systemctl status with that PID number tells you which service owns it. Killing a PID that systemd restarts gets you nowhere.
+Run: nvidia-smi, then systemctl status PID. Fix: sudo systemctl disable --now ollama (disable = do not start at boot, --now = and stop it right now), then sudo systemctl restart analytics (it only picks CPU or GPU when it starts), then nvidia-smi again.

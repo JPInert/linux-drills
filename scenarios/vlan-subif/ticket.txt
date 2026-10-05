@@ -1,0 +1,12 @@
+From:     Tier 1 alert desk, Northgate Garage
+Priority: P1
+Box:      edge-nvr-03    (the install sheet is in your home directory)
+
+  "After last night's reimage of edge-nvr-03 (golden image v7), BOTH
+   cameras show 'reconnecting' and there are no fall alerts at all.
+   Tier 1 checked the box: the camera network interface is there, it is
+   UP and it has the right IP address. So it must be the switch. Should
+   we send the network vendor out to the site?"
+
+You are `tech`, with sudo. Nobody can touch the switch today. Get both
+cameras back into vehicle counting, and keep it that way after a reboot.

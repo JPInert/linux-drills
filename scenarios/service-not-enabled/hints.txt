@@ -1,0 +1,3 @@
+Ping works, so the network path is fine. Before blaming the network: is anything on THIS box even listening on port 8090?
+Ask systemd about the camwatch service (systemctl status camwatch). "Is it running now?" (active) and "will it start at boot?" (enabled) are two separate questions with two separate answers.
+`sudo ss -tlnp` lists what is listening (t = TCP, l = listening, n = numbers, p = which program). Then `sudo systemctl enable --now camwatch` (enable = start at every boot, --now = and start it right now), and `curl -s localhost:8090` to prove it answers (-s = no progress bar).

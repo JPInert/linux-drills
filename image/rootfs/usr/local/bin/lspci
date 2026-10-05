@@ -1,0 +1,10 @@
+#!/bin/sh
+# mock lspci for the edge box (the container has no real PCI bus view)
+cat <<'PCI'
+00:00.0 Host bridge: Intel Corporation Device 4660 (rev 02)
+00:02.0 VGA compatible controller: Intel Corporation AlderLake-S GT1 (rev 0c)
+00:1f.6 Ethernet controller: Intel Corporation Ethernet Connection (17) I219-LM (rev 11)
+01:00.0 VGA compatible controller: NVIDIA Corporation GA106 [RTX A2000 12GB] (rev a1)
+01:00.1 Audio device: NVIDIA Corporation GA106 High Definition Audio Controller (rev a1)
+02:00.0 Non-Volatile memory controller: Samsung Electronics Co Ltd NVMe SSD Controller SM981/PM981/PM983
+PCI

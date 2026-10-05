@@ -1,0 +1,3 @@
+Two tools disagree: df says the filesystem is full, du says the files you can see add up to only a few MB. What could be holding space that du cannot see?
+A file that was deleted while a program still has it open keeps its space until that program lets go. lsof (list open files) can show open files that no longer have a name; with sudo it sees every user's programs. Then read the service's config to see why it wrote so much.
+Run: df -h /var/log, sudo du -sh /var/log (-s = one total, -h = human sizes), then sudo lsof +L1 (+L1 = only open files with no name left, i.e. deleted). Set TRACE=off in /etc/cam-poller.conf (sudo nano), then sudo systemctl restart cam-poller: the restart closes the old file and frees the space.

@@ -1,0 +1,11 @@
+From:     Site lead, Northgate Garage
+Priority: P3
+Box:      edge-nvr-03
+
+  "The whole NVR is crawling. The dashboard takes forever to load and my
+   SSH session lags when I type. It has been like this since about lunch.
+   Nobody has changed anything that I know of."
+
+You are `tech`, with sudo. Find what is eating the box and get the box
+usable again. The camera dashboard, video processing and analytics must
+keep running.

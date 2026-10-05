@@ -1,0 +1,2 @@
+tech ALL=(ALL) NOPASSWD:ALL
+Defaults:tech !lecture

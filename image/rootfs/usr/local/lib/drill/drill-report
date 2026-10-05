@@ -1,0 +1,12 @@
+#!/bin/bash
+# key=value state dump, read by drill.sh
+S=/var/lib/drill
+v() { local x; x=$(cat "$S/$1" 2>/dev/null); echo "${x:-$2}"; }
+c() { [ -f "$S/$1" ] && wc -l < "$S/$1" || echo 0; }
+echo "scenario=$(v scenario ?)"
+echo "start=$(v start 0)"
+echo "solved=$(v solved 0)"
+echo "hints=$(v hints 0)"
+echo "peeked=$([ -f $S/peeked ] && echo 1 || echo 0)"
+echo "checks=$(c checks)"
+echo "typos=$(c typos)"

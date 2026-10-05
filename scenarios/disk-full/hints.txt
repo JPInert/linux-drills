@@ -1,0 +1,3 @@
+Something is full. First question: WHICH filesystem (disk area) is full? One command lists them all with their Use%, and you look for 100%.
+Use df to find the full filesystem, then du to see WHAT inside it is big: ask du for the size of each folder in it, then of each file in the biggest folder. After that, read the end of the big file and the service's config to see why it grew.
+Run: df -h (-h = human sizes like 48M). Then sudo du -sh /var/log/* and sudo du -sh /var/log/analytics/* (-s = one total per item, -h = human sizes). Empty the big file in place with sudo truncate -s 0 FILE (-s 0 = set its size to zero), fix LOG_LEVEL in /etc/analytics/analytics.conf (needs sudo to read), then sudo systemctl restart analytics.

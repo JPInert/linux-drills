@@ -1,0 +1,12 @@
+From:     NOC monitoring + site lead, Northgate Garage
+Priority: P2
+Box:      site-laptop-02  (your laptop; the new hub is cabled to it over USB)
+
+  "Camera snapshots from the new hub stopped reaching the NOC this
+   morning, right after the overnight OS update. The hub itself is fine:
+   LED green, power fine, it answers on the network. It feels like the
+   uplink is dropping our uploads."
+
+You are `tech`, with sudo, and adb is installed on this laptop. Find out why
+the hub's camera service (com.facility.camerad) is not delivering and get it
+running again. Its config was hand-provisioned: do not wipe or reinstall it.

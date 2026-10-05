@@ -1,0 +1,2163 @@
+#!/usr/bin/env python3
+"""Mock `adb` (Android Debug Bridge) for the linux-drills training image.
+
+There is no real device: this script plays the adb client, the adb server and a Qualcomm QCS6490
+"Facility Hub" running Android 13.  Everything it knows lives in /var/lib/mock-adb/ (root-owned; when
+run as another user the script re-executes itself through `sudo -n`, so a scenario's state is not
+casually editable and no world-writable files are needed).
+
+STATE  /var/lib/mock-adb/state.json is a *partial* JSON document.  On every call it is deep-merged over
+the built-in healthy default (dicts merge, lists/scalars replace) and the full result is written back.
+A scenario's break.sh therefore only writes the keys it wants to change.  Keys:
+
+  server.running          adb server (daemon) up?  False => the next call prints the "* daemon not running" lines
+  usb_devices             physical USB devices: [{serial, state, usb}]   state: device|offline|unauthorized|no permissions
+  devices                 the SERVER's transport table: [{serial, transport: usb|tcp, state, tid}]
+                          (usb entries are re-derived from usb_devices while the server runs; tcp entries are
+                          authoritative, which is how a stale 'offline' entry survives until kill-server/disconnect)
+  hosts                   what answers on the LAN: {"10.50.0.77": {hub: true, ports: {"5555": true}, authorized: true}}
+                          (unknown host => connect times out; known host, closed port => connection refused)
+  reboot                  {until: epoch} while the hub is rebooting (10 s)
+  hub.boot_epoch          when the hub last booted
+  hub.wan_up              wired uplink works? (`adb shell ping` succeeds if wan_up or the cellular data link is up)
+  hub.props               static getprop values (gsm.* are DERIVED, see below)
+  hub.settings.{global,secure,system}   `settings get/put`.  airplane_mode_on / mobile_data live in global
+  hub.radio               {airplane: effective modem-off flag, sim: present|absent|pin_required, coverage: bool}
+                          NOTE: `settings put global airplane_mode_on 0` changes only the setting; the radio follows
+                          `cmd connectivity airplane-mode ...` or `am broadcast -a android.intent.action.AIRPLANE_MODE`
+  hub.packages.<pkg>      {permissions: {perm: {granted, runtime, flags}}, requires: [perms needed to start],
+                           persistent, running, pid, next_restart (epoch), restart_delay (s), ...}
+                          A persistent package that is not running is (re)started when next_restart passes; if a
+                          required permission is missing it crashes (FATAL EXCEPTION in logcat) and the restart
+                          delay grows x4 up to 1 h, exactly like ActivityManager's crashed-service backoff.
+                          `am force-stop` resets the backoff and restarts it at once; `pm grant` alone does not.
+  logcat.<buf>.txt        logcat ring buffers (main system radio events crash) in threadtime format
+
+DERIVED (never stored, computed from the above on every call): gsm.sim.state, gsm.network.type, telephony
+registry service/data state, rmnet_data0 up/down, the device list.
+
+ADMIN interface for break.sh / check.sh (root; undocumented in `adb help`):
+  adb --mock get PATH          print a value; PATH is '/'-separated, e.g.  hub/packages/com.facility.camerad/running
+                               or derived/sim_state  derived/devices  derived/airplane  derived/data_conn_state
+  adb --mock set PATH JSON     e.g.  adb --mock set hub/settings/global/airplane_mode_on '"1"'
+  adb --mock log BUF AGO_S PID TID LVL TAG MSG...   append a threadtime line dated AGO_S seconds ago
+  adb --mock noise BUF N SPAN_S                     N generic background lines spread over the last SPAN_S seconds
+  adb --mock tick | dump | reset
+"""
+import contextlib
+import copy
+import fcntl
+import json
+import os
+import random
+import re
+import shlex
+import signal
+import sys
+import time
+
+STATE_DIR = os.environ.get("MOCK_ADB_DIR", "/var/lib/mock-adb")
+STATE_FILE = STATE_DIR + "/state.json"
+LOCK_FILE = STATE_DIR + "/.lock"
+ALL_BUFS = ["main", "system", "radio", "events", "crash"]
+DEF_BUFS = ["main", "system", "crash"]
+PRIO = "VDIWEFS"
+HUB_SERIAL = "a3f7c19e"
+HUB_IP = "10.50.0.77"
+SYS_PID = 1188          # system_server
+PHONE_PID = 1901        # com.android.phone
+REBOOT_SECS = 10
+CARRIER = "Coastal Wireless"
+PLMN = "00101"
+
+
+# ---------------------------------------------------------------- output helpers
+def out(s=""):
+    sys.stdout.write(s + "\n")
+
+
+def err(s=""):
+    sys.stdout.flush()
+    sys.stderr.write(s + "\n")
+    sys.stderr.flush()
+
+
+def die(msg, rc=1):
+    err(msg)
+    sys.exit(rc)
+
+
+# ---------------------------------------------------------------- default (healthy) state
+def perm_map(normal, runtime):
+    m = {}
+    for p in normal:
+        m[p] = {"granted": True, "runtime": False, "flags": ""}
+    for p, g in runtime:
+        m[p] = {"granted": g, "runtime": True, "flags": "USER_SET" if g else ""}
+    return m
+
+
+def mkpkg(uid, ver, code, normal=(), runtime=(), system=False, persistent=False, requires=(), running=False, pid=0):
+    return {"system": system, "uid": uid, "version": ver, "code": code, "persistent": persistent,
+            "requires": list(requires), "running": running, "pid": pid, "next_restart": None,
+            "restart_delay": 1, "last_attempt": None, "last_pid": 0, "crashes": 0, "enabled": True,
+            "permissions": perm_map(normal, runtime)}
+
+
+PROPS = {
+    "ro.product.model": "Facility Hub QCS6490", "ro.product.brand": "Facility",
+    "ro.product.manufacturer": "Facility Systems", "ro.product.name": "qcs6490_hub",
+    "ro.product.device": "qcs6490", "ro.product.board": "kodiak", "ro.board.platform": "kodiak",
+    "ro.hardware": "qcom", "ro.boot.hardware": "qcom", "ro.soc.manufacturer": "QTI", "ro.soc.model": "QCS6490",
+    "ro.product.cpu.abi": "arm64-v8a", "ro.build.version.release": "13", "ro.build.version.sdk": "33",
+    "ro.build.version.security_patch": "2026-09-05", "ro.build.id": "TQ3A.230901.001",
+    "ro.build.display.id": "fh-qcs6490-2026.09.1", "ro.build.type": "user", "ro.build.tags": "release-keys",
+    "ro.build.fingerprint": "Facility/qcs6490_hub/qcs6490:13/TQ3A.230901.001/2026.09.1:user/release-keys",
+    "ro.serialno": HUB_SERIAL, "ro.boot.serialno": HUB_SERIAL, "ro.debuggable": "0", "ro.secure": "1",
+    "ro.adb.secure": "1", "gsm.version.baseband": "MPSS.HI.4.3.1-00184-KODIAK_GEN_PACK-1",
+    "gsm.version.ril-impl": "Qualcomm RIL 1.0", "gsm.current.phone-type": "1",
+    "persist.radio.multisim.config": "ssss", "persist.vendor.radio.data_con_rprt": "1",
+    "persist.sys.timezone": "America/New_York", "service.adb.tcp.port": "5555", "sys.boot_completed": "1",
+    "init.svc.adbd": "running", "init.svc.qcrilNrd": "running", "net.hostname": "facility-hub-0077",
+    "ro.boot.slot_suffix": "_a", "ro.boot.verifiedbootstate": "green",
+}
+
+
+def default_state():
+    cam_norm = ["android.permission.INTERNET", "android.permission.ACCESS_NETWORK_STATE",
+                "android.permission.FOREGROUND_SERVICE", "android.permission.RECEIVE_BOOT_COMPLETED",
+                "android.permission.WAKE_LOCK"]
+    pk = {
+        "com.facility.camerad": mkpkg(10087, "4.1.2", 4102, cam_norm,
+                                      [("android.permission.CAMERA", True), ("android.permission.RECORD_AUDIO", True)],
+                                      persistent=True, requires=["android.permission.CAMERA"], running=True, pid=3182),
+        "com.facility.hubagent": mkpkg(10088, "2.7.0", 2700, cam_norm[:4],
+                                       [("android.permission.READ_PHONE_STATE", True),
+                                        ("android.permission.ACCESS_FINE_LOCATION", True)],
+                                       persistent=True, running=True, pid=3204),
+        "com.facility.provision": mkpkg(10089, "1.3.0", 1300, cam_norm[:2],
+                                        [("android.permission.READ_PHONE_STATE", True)]),
+    }
+    for name, uid, running, pid in [("android", 1000, False, 0), ("com.android.phone", 1001, True, PHONE_PID),
+                                    ("com.android.settings", 1000, False, 0), ("com.android.systemui", 10071, True, 1544),
+                                    ("com.android.providers.telephony", 1001, False, 0),
+                                    ("com.android.providers.settings", 1000, False, 0),
+                                    ("com.qualcomm.qti.telephonyservice", 1001, True, 1612),
+                                    ("com.qualcomm.qti.qcrilmsgtunnel", 1001, False, 0),
+                                    ("com.android.shell", 2000, False, 0),
+                                    ("com.android.permissioncontroller", 10054, False, 0)]:
+        pk[name] = mkpkg(uid, "13", 33, system=True, running=running, pid=pid)
+    return {
+        "server": {"running": False},
+        "usb_devices": [{"serial": HUB_SERIAL, "state": "device", "usb": "1-1"}],
+        "devices": [], "next_tid": 1, "next_pid": 4700, "hosts": {}, "reboot": None, "logs_seeded": False,
+        "hub": {
+            "boot_epoch": None, "wan_up": True, "props": dict(PROPS),
+            "settings": {
+                "global": {"airplane_mode_on": "0", "mobile_data": "1", "data_roaming": "0", "adb_enabled": "1",
+                           "development_settings_enabled": "1", "stay_on_while_plugged_in": "3",
+                           "device_name": "Facility Hub QCS6490", "auto_time": "1", "wifi_on": "0",
+                           "bluetooth_on": "0", "boot_count": "14"},
+                "secure": {"android_id": "5e1c9a7b3d0f42a8", "location_mode": "0", "adb_wifi_enabled": "0",
+                           "install_non_market_apps": "1"},
+                "system": {"screen_off_timeout": "600000", "screen_brightness": "102", "time_12_24": "24"},
+            },
+            "radio": {"airplane": False, "sim": "present", "coverage": True},
+            "packages": pk,
+        },
+    }
+
+
+# ---------------------------------------------------------------- state store
+def deep_merge(base, over):
+    for k, v in over.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            deep_merge(base[k], v)
+        else:
+            base[k] = v
+    return base
+
+
+def load_state(now):
+    st = default_state()
+    try:
+        with open(STATE_FILE) as f:
+            deep_merge(st, json.load(f))
+    except (OSError, ValueError):
+        pass
+    if st["hub"].get("boot_epoch") is None:
+        st["hub"]["boot_epoch"] = now - 3 * 86400 - 5400
+    return st
+
+
+class Store(object):
+    @contextlib.contextmanager
+    def tx(self, tick=True):
+        try:
+            os.makedirs(STATE_DIR, 0o700, exist_ok=True)
+            fd = os.open(LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError:
+            fd = None
+        if fd is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        now = time.time()
+        st = load_state(now)
+        st["_now"] = now
+        try:
+            if tick:
+                do_tick(st, now)
+            yield st
+        except KeyboardInterrupt:
+            raise
+        finally:
+            st.pop("_now", None)
+            try:
+                tmp = STATE_FILE + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(st, f, indent=1, sort_keys=True)
+                os.replace(tmp, STATE_FILE)
+            except OSError:
+                pass
+            if fd is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+
+STORE = Store()
+
+
+# ---------------------------------------------------------------- logcat buffers
+LOG_RE = re.compile(r"^(\d\d-\d\d \d\d:\d\d:\d\d\.\d{3})\s+(\d+)\s+(\d+)\s+([VDIWEFA])\s+(.*?)\s*:\s?(.*)$")
+
+
+def logpath(buf):
+    return "%s/logcat.%s.txt" % (STATE_DIR, buf)
+
+
+def fmt_ts(t):
+    return time.strftime("%m-%d %H:%M:%S", time.localtime(t)) + ".%03d" % int((t % 1) * 1000)
+
+
+def write_log(buf, t, pid, tid, lvl, tag, msg):
+    line = "%s %5d %5d %s %-8s: %s\n" % (fmt_ts(t), pid, tid, lvl, tag, msg)
+    try:
+        with open(logpath(buf), "a") as f:
+            f.write(line)
+        if os.path.getsize(logpath(buf)) > 900000:
+            keep = read_log_raw(buf)[-4000:]
+            with open(logpath(buf), "w") as f:
+                f.write("\n".join(keep) + "\n")
+    except OSError:
+        pass
+
+
+def read_log_raw(buf):
+    try:
+        with open(logpath(buf)) as f:
+            return [ln.rstrip("\n") for ln in f]
+    except OSError:
+        return []
+
+
+def parse_entries(buf):
+    res = []
+    for ln in read_log_raw(buf):
+        m = LOG_RE.match(ln)
+        if m:
+            res.append((m.group(1), int(m.group(2)), int(m.group(3)), m.group(4), m.group(5), m.group(6), buf))
+        elif ln.strip():
+            res.append(("", 0, 0, "V", "", ln, buf))
+    return res
+
+
+MAIN_NOISE = [
+    (3204, 3230, "I", "hubagent", "heartbeat ok (rtt=41ms)"),
+    (3204, 3230, "D", "hubagent", "poll config: no change (etag=9f2c1a)"),
+    (3204, 3231, "I", "hubagent", "telemetry batch sent: 12 samples"),
+    (SYS_PID, 1277, "D", "ConnectivityService", "NetworkAgent: ethernet validated, score=70"),
+    (SYS_PID, 1215, "I", "chatty", "uid=1000(system) Binder:1188_A identical 2 lines"),
+    (900, 900, "D", "vendor.qti.hardware.perf", "perf hal: profile balanced (no change)"),
+    (SYS_PID, 1264, "D", "BatteryStatsImpl", "noteScreenState: off"),
+    (SYS_PID, 1290, "I", "thermal", "cpu-cluster0 temp 47C: ok"),
+    (1250, 1250, "I", "SurfaceFlinger", "Display 0 power mode: DOZE_SUSPEND"),
+    (SYS_PID, 1301, "D", "NtpTrustedTime", "fetched time from pool: offset=+4ms"),
+]
+RADIO_NOISE_UP = [
+    (PHONE_PID, PHONE_PID, "D", "RILJ", "[UNSL]< UNSOL_SIGNAL_STRENGTH [PHONE0]"),
+    (PHONE_PID, PHONE_PID, "D", "GsmSST", "[SST0] pollStateDone: registered LTE " + CARRIER),
+    (PHONE_PID, PHONE_PID, "D", "DcTracker", "[0] data attached, apn=internet, iface=rmnet_data0"),
+    (905, 905, "I", "qcrilNrd", "RIL: signal strength updated rsrp=-96 rsrq=-11"),
+]
+RADIO_NOISE_DOWN = [
+    (PHONE_PID, PHONE_PID, "D", "SST", "[SST0] pollStateDone: OUT_OF_SERVICE (radio off)"),
+    (PHONE_PID, PHONE_PID, "D", "UiccController", "Card state PRESENT, app state NOT_READY (radio off)"),
+    (905, 905, "W", "qcrilNrd", "RIL: modem offline, dropping request LAST_DATA_CALL_FAIL_CAUSE"),
+    (PHONE_PID, PHONE_PID, "D", "DcTracker", "[0] trySetupData failed: radio not available"),
+]
+
+
+def cmd_noise(buf, n, span, st=None):
+    """n generic background lines over the last span seconds (deterministic per buffer/n)."""
+    rnd = random.Random("%s%d" % (buf, n))
+    now = time.time()
+    if buf == "radio":
+        pool = RADIO_NOISE_DOWN if (st and st["hub"]["radio"].get("airplane")) else RADIO_NOISE_UP
+    elif buf == "system":
+        pool = [(SYS_PID, 1230, "I", "PackageManager", "Reconciled 41 packages, 0 changes"),
+                (SYS_PID, 1231, "D", "AlarmManager", "next alarm in 3600s"),
+                (SYS_PID, 1232, "I", "StorageManager", "fstrim idle maintenance: done")]
+    else:
+        pool = MAIN_NOISE
+    ts = sorted(now - rnd.random() * span for _ in range(n))
+    for t in ts:
+        pid, tid, lvl, tag, msg = pool[rnd.randrange(len(pool))]
+        write_log(buf, t, pid, tid, lvl, tag, msg)
+
+
+def seed_logs(st):
+    if st.get("logs_seeded"):
+        return
+    st["logs_seeded"] = True
+    for buf, n in (("main", 22), ("system", 8), ("radio", 12)):
+        if not os.path.exists(logpath(buf)):
+            cmd_noise(buf, n, 1800, st)
+
+
+# ---------------------------------------------------------------- device table / server
+def sync_usb(st, now):
+    if not st["server"]["running"]:
+        return
+    rb = st.get("reboot")
+    hidden = bool(rb and now < rb["until"])
+    tbl = st["devices"]
+    phys = {} if hidden else dict((u["serial"], u) for u in st["usb_devices"])
+    st["devices"] = tbl = [d for d in tbl if d["transport"] != "usb" or d["serial"] in phys]
+    for serial, u in phys.items():
+        ex = [d for d in tbl if d["serial"] == serial]
+        if ex:
+            ex[0]["state"] = u.get("state", "device")
+            ex[0]["usb"] = u.get("usb", "1-1")
+        else:
+            tbl.append({"serial": serial, "transport": "usb", "state": u.get("state", "device"),
+                        "tid": st["next_tid"], "usb": u.get("usb", "1-1")})
+            st["next_tid"] += 1
+
+
+def ensure_server(st):
+    if not st["server"]["running"]:
+        err("* daemon not running; starting now at tcp:5037")
+        time.sleep(0.3)
+        err("* daemon started successfully")
+        st["server"]["running"] = True
+        st["devices"] = []
+        sync_usb(st, st["_now"])
+
+
+def state_text(d):
+    if d["state"] == "no permissions":
+        return "no permissions (user in plugdev group; are your udev rules wrong?); see [http://developer.android.com/tools/device.html]"
+    return d["state"]
+
+
+def dev_line(d, long_fmt):
+    if not long_fmt:
+        return "%s\t%s" % (d["serial"], state_text(d))
+    parts = ["%-22s %s" % (d["serial"], state_text(d))]
+    if d["transport"] == "usb":
+        parts.append("usb:%s" % d.get("usb", "1-1"))
+    if d["state"] == "device":
+        parts += ["product:qcs6490_hub", "model:Facility_Hub_QCS6490", "device:qcs6490"]
+    parts.append("transport_id:%d" % d["tid"])
+    return " ".join(parts)
+
+
+def resolve_device(st, o, need_online=True):
+    tbl = st["devices"]
+    serial = o.get("serial") or os.environ.get("ANDROID_SERIAL")
+    cands = tbl
+    if o.get("usb"):
+        cands = [d for d in tbl if d["transport"] == "usb"]
+    if o.get("emu"):
+        die("error: no emulators found")
+    if o.get("tid") is not None:
+        m = [d for d in tbl if d["tid"] == o["tid"]]
+        if not m:
+            die("error: device with transport id '%d' not found" % o["tid"])
+        d = m[0]
+    elif serial:
+        m = [x for x in tbl if x["serial"] == serial]
+        if not m:
+            die("error: device '%s' not found" % serial)
+        d = m[0]
+    else:
+        if not cands:
+            die("error: no devices/emulators found")
+        if len(cands) > 1:
+            die("error: more than one device/emulator")
+        d = cands[0]
+    if need_online:
+        if d["state"] == "offline":
+            die("error: device offline")
+        if d["state"] == "unauthorized":
+            die("error: device unauthorized.\nThis adbd's $ADB_VENDOR_KEYS is not set\nTry 'adb kill-server' if that seems wrong.\n"
+                "Otherwise check for a confirmation dialog on your device or try 'adb reconnect'")
+        if d["state"] == "no permissions":
+            die("error: insufficient permissions for device: user in plugdev group; are your udev rules wrong?\n"
+                "See [http://developer.android.com/tools/device.html] for more information")
+    return d
+
+
+# ---------------------------------------------------------------- hub simulation: apps, reboot, radio
+def new_pid(st):
+    st["next_pid"] += 7
+    return st["next_pid"]
+
+
+def uname(p):
+    return "u0a%d" % (p["uid"] - 10000) if p["uid"] >= 10000 else "system"
+
+
+def log2(bufs, t, pid, tid, lvl, tag, msg):
+    for b in bufs:
+        write_log(b, t, pid, tid, lvl, tag, msg)
+
+
+CRASH_FRAMES = [
+    "android.hardware.camera2.CameraManager.throwAsPublicException(CameraManager.java:1120)",
+    "android.hardware.camera2.CameraManager.openCameraDeviceUserAsync(CameraManager.java:571)",
+    "android.hardware.camera2.CameraManager.openCamera(CameraManager.java:690)",
+    "com.facility.camerad.CaptureService.openCamera(CaptureService.java:142)",
+    "com.facility.camerad.CaptureService.onStartCommand(CaptureService.java:97)",
+    "android.app.ActivityThread.handleServiceArgs(ActivityThread.java:4661)",
+    "android.app.ActivityThread$H.handleMessage(ActivityThread.java:2153)",
+    "android.os.Handler.dispatchMessage(Handler.java:106)",
+    "android.os.Looper.loopOnce(Looper.java:201)",
+    "android.os.Looper.loop(Looper.java:288)",
+    "android.app.ActivityThread.main(ActivityThread.java:7872)",
+    "java.lang.reflect.Method.invoke(Native Method)",
+    "com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run(RuntimeInit.java:548)",
+    "com.android.internal.os.ZygoteInit.main(ZygoteInit.java:936)",
+]
+
+
+def attempt_start(st, name, p, at):
+    """Start the package's process at time `at`. Crashes (with logs) if a required permission is missing."""
+    pid = new_pid(st)
+    un = uname(p)
+    if not p["requires"]:                      # ordinary persistent app: starts, says hello, done
+        log2(["main"], at, SYS_PID, 1301, "I", "ActivityManager",
+             "Start proc %d:%s/%s for service {%s/%s.MainService}" % (pid, name, un, name, name))
+        log2(["main"], at + 0.5, pid, pid, "I", name.split(".")[-1], "service ready")
+        p.update({"running": True, "pid": pid, "started": at, "next_restart": None, "restart_delay": 1})
+        return True
+    log2(["main"], at, SYS_PID, 1301, "I", "ActivityManager",
+         "Start proc %d:%s/%s for service {%s/%s.CaptureService}" % (pid, name, un, name, name))
+    missing = [r for r in p["requires"] if not p["permissions"].get(r, {}).get("granted")]
+    if not missing:
+        p.update({"running": True, "pid": pid, "started": at, "next_restart": None, "restart_delay": 1})
+        log2(["main"], at + 0.30, pid, pid, "I", "CaptureService", "onStartCommand: camera permission ok")
+        log2(["main"], at + 0.62, pid, pid, "I", "CameraManagerGlobal", "Connecting to camera service")
+        log2(["main"], at + 0.95, pid, pid, "I", "CaptureService", "camera 0 opened (1920x1080@30), stream rtsp://0.0.0.0:8554/cam0 up")
+        log2(["main"], at + 1.20, pid, pid, "I", "camerad", "service ready, snapshots -> NOC uploader (cam0)")
+        return True
+    perm = missing[0]
+    log2(["main"], at + 0.15, pid, pid, "I", "CaptureService", "onStartCommand: opening camera 0")
+    c = at + 0.30
+    head = [("FATAL EXCEPTION: main"), ("Process: %s, PID: %d" % (name, pid)),
+            ("java.lang.SecurityException: Permission Denial: opening camera 0 from ProcessInfo{%d:%s/%s} (pid=%d, uid=%d) requires %s"
+             % (pid, name, un, pid, p["uid"], perm))]
+    for m in head + ["\tat " + fr for fr in CRASH_FRAMES]:
+        log2(["crash"], c, pid, pid, "E", "AndroidRuntime", m)
+    delay = p.get("restart_delay", 1)
+    log2(["main"], c + 0.10, SYS_PID, 1301, "W", "ActivityManager", "Process %s (pid %d) has died: fg  SVC" % (name, pid))
+    log2(["main"], c + 0.11, SYS_PID, 1301, "W", "ActivityManager",
+         "Scheduling restart of crashed service %s/.CaptureService in %dms" % (name, delay * 1000))
+    p.update({"running": False, "pid": 0, "last_pid": pid, "last_attempt": at, "crashes": p.get("crashes", 0) + 1,
+              "next_restart": c + 0.11 + delay, "restart_delay": min(delay * 4, 3600)})
+    return False
+
+
+def tick_apps(st, now):
+    for name, p in st["hub"]["packages"].items():
+        nr = p.get("next_restart")
+        if p.get("running") or nr is None or not p.get("persistent"):
+            continue
+        n = 0
+        while p.get("next_restart") is not None and p["next_restart"] <= now and not p["running"] and n < 40:
+            attempt_start(st, name, p, p["next_restart"])
+            n += 1
+
+
+def complete_reboot(st, now):
+    rb = st.get("reboot")
+    if not rb or now < rb["until"]:
+        return
+    st["reboot"] = None
+    u = rb["until"]
+    st["hub"]["boot_epoch"] = u
+    for p in st["hub"]["packages"].values():
+        if p.get("persistent"):
+            p["running"] = False
+            p["pid"] = 0
+            p["restart_delay"] = 1
+            p["next_restart"] = u + 8
+    boot_msgs = [(SYS_PID, 1188, "I", "SystemServer", "Entered the Android system server!"),
+                 (SYS_PID, 1188, "I", "SystemServer", "Boot completed: sys.boot_completed=1")]
+    for k, m in enumerate(boot_msgs):
+        write_log("main", u + 1 + k * 3, m[0], m[1], m[2], m[3], m[4])
+
+
+def do_tick(st, now):
+    complete_reboot(st, now)
+    sync_usb(st, now)
+    tick_apps(st, now)
+
+
+def begin_reboot(st, now):
+    st["reboot"] = {"until": now + REBOOT_SECS}
+    st["devices"] = [d for d in st["devices"] if d["transport"] == "usb"]
+    for p in st["hub"]["packages"].values():
+        if p.get("running") and not p.get("system"):
+            p["running"] = False
+            p["pid"] = 0
+    for b in ALL_BUFS:                                   # ring buffers do not survive a reboot
+        try:
+            os.remove(logpath(b))
+        except OSError:
+            pass
+    st["logs_seeded"] = True
+    sync_usb(st, now)
+
+
+def set_airplane(st, on, now, via):
+    g = st["hub"]["settings"]["global"]
+    g["airplane_mode_on"] = "1" if on else "0"
+    apply_radio(st, on, now)
+
+
+def apply_radio(st, on, now):
+    r = st["hub"]["radio"]
+    was = bool(r.get("airplane"))
+    r["airplane"] = bool(on)
+    if was == bool(on):
+        return
+    if on:
+        for i, (lv, tag, m) in enumerate([
+                ("D", "SST", "[SST0] setRadioPower: airplane mode on -> power=false"),
+                ("D", "RILJ", "[3301]> RADIO_POWER off [PHONE0]"),
+                ("D", "RILJ", "[UNSL]< UNSOL_RESPONSE_RADIO_STATE_CHANGED RADIO_OFF [PHONE0]"),
+                ("D", "DcTracker", "[0] onDataConnectionDetached: radio off")]):
+            write_log("radio", now + i * 0.02, PHONE_PID, PHONE_PID, lv, tag, m)
+    else:
+        seq = [("D", "SST", "[SST0] setRadioPower: airplane mode off -> power=true"),
+               ("D", "RILJ", "[3355]> RADIO_POWER on [PHONE0]"),
+               ("D", "RILJ", "[UNSL]< UNSOL_RESPONSE_RADIO_STATE_CHANGED RADIO_ON [PHONE0]"),
+               ("I", "UiccController", "Card state PRESENT, app state READY -> LOADED")]
+        if st["hub"]["radio"].get("coverage", True):
+            seq.append(("I", "GsmSST", "[SST0] Registered on %s (%s) LTE" % (CARRIER, PLMN)))
+            if str(st["hub"]["settings"]["global"].get("mobile_data", "1")) == "1":
+                seq.append(("I", "DcTracker", "[0] Data connected: apn=internet, iface=rmnet_data0"))
+        for i, (lv, tag, m) in enumerate(seq):
+            write_log("radio", now + 0.01 + i * 0.01, PHONE_PID, PHONE_PID, lv, tag, m)
+
+
+def set_mobile_data(st, on, now):
+    g = st["hub"]["settings"]["global"]
+    was = str(g.get("mobile_data", "1")) == "1"
+    g["mobile_data"] = "1" if on else "0"
+    if was != on:
+        write_log("radio", now, PHONE_PID, PHONE_PID, "D", "DcTracker", "[0] setDataEnabled: %s" % ("true" if on else "false"))
+        if on and derive(st)["in_service"]:
+            write_log("radio", now + 0.01, PHONE_PID, PHONE_PID, "I", "DcTracker", "[0] Data connected: apn=internet, iface=rmnet_data0")
+
+
+def derive(st):
+    hub = st["hub"]
+    r = hub["radio"]
+    g = hub["settings"]["global"]
+    air = bool(r.get("airplane"))
+    sim = r.get("sim", "present")
+    data_on = str(g.get("mobile_data", "1")) == "1"
+    if sim == "absent":
+        ss = "ABSENT"
+    elif air:
+        ss = "NOT_READY"
+    elif sim == "pin_required":
+        ss = "PIN_REQUIRED"
+    else:
+        ss = "LOADED"
+    insvc = (not air) and sim == "present" and bool(r.get("coverage", True))
+    d = {"airplane": air, "sim_state": ss, "in_service": insvc, "network_type": "LTE" if insvc else "Unknown",
+         "voice_reg_state": 0 if insvc else 1, "data_reg_state": 0 if insvc else 1,
+         "data_conn_state": 2 if (insvc and data_on) else 0, "rmnet_up": bool(insvc and data_on),
+         "operator_alpha": CARRIER if insvc else "", "operator_numeric": PLMN if insvc else "",
+         "mobile_data": data_on}
+    d["devices"] = ["%s\t%s" % (x["serial"], x["state"]) for x in st["devices"]] if st["server"]["running"] else []
+    return d
+
+
+def all_props(st):
+    p = dict(st["hub"]["props"])
+    d = derive(st)
+    p.update({"gsm.sim.state": d["sim_state"], "gsm.network.type": d["network_type"],
+              "gsm.operator.alpha": d["operator_alpha"], "gsm.operator.numeric": d["operator_numeric"],
+              "gsm.operator.iso-country": "us" if d["in_service"] else "", "gsm.operator.isroaming": "false" if d["in_service"] else "",
+              "gsm.sim.operator.alpha": CARRIER if d["sim_state"] == "LOADED" else "",
+              "gsm.sim.operator.numeric": PLMN if d["sim_state"] == "LOADED" else "",
+              "gsm.sim.operator.iso-country": "us" if d["sim_state"] == "LOADED" else ""})
+    return p
+
+
+def r_present(st):
+    return st["hub"]["radio"].get("sim", "present") != "absent"
+
+
+# ---------------------------------------------------------------- device-side shell
+class ShellExit(Exception):
+    def __init__(self, rc):
+        self.rc = rc
+
+
+class Sh(object):
+    def __init__(self):
+        self.st = None
+        self.now = 0.0
+        self.cwd = "/"
+        self.pid = 9000 + os.getpid() % 900
+
+
+def O(s="", rc=0):
+    return s, "", rc
+
+
+def E(s, rc=1):
+    return "", s, rc
+
+
+def lines_of(s):
+    return s.split("\n")[:-1] if s.endswith("\n") else s.split("\n")
+
+
+def bre_to_re(p, ere):
+    if ere:
+        return p
+    res = []
+    i = 0
+    while i < len(p):
+        c = p[i]
+        if c == "\\" and i + 1 < len(p):
+            n = p[i + 1]
+            res.append(n if n in "|+?(){}" else "\\" + n)
+            i += 2
+            continue
+        res.append("\\" + c if c in "|+?(){}" else c)
+        i += 1
+    return "".join(res)
+
+
+def c_grep(sh, a, inp):
+    ic = inv = ere = fixed = cnt = num = word = quiet = only = False
+    pats = []
+    ctxA = ctxB = 0
+    files = []
+    i = 0
+    while i < len(a):
+        x = a[i]
+        if x == "--":
+            files += a[i + 1:]
+            break
+        if x.startswith("-") and len(x) > 1:
+            j = 1
+            while j < len(x):
+                c = x[j]
+                if c in "ABC":
+                    val = x[j + 1:] or (a[i + 1] if i + 1 < len(a) else "0")
+                    if not x[j + 1:]:
+                        i += 1
+                    try:
+                        n = int(val)
+                    except ValueError:
+                        return E("grep: bad context length '%s'" % val, 2)
+                    if c in "AC":
+                        ctxA = n
+                    if c in "BC":
+                        ctxB = n
+                    break
+                if c == "e":
+                    val = x[j + 1:] or (a[i + 1] if i + 1 < len(a) else "")
+                    if not x[j + 1:]:
+                        i += 1
+                    pats.append(val)
+                    break
+                if c == "i":
+                    ic = True
+                elif c == "v":
+                    inv = True
+                elif c == "E":
+                    ere = True
+                elif c == "F":
+                    fixed = True
+                elif c == "c":
+                    cnt = True
+                elif c == "n":
+                    num = True
+                elif c == "w":
+                    word = True
+                elif c == "q":
+                    quiet = True
+                elif c == "o":
+                    only = True
+                j += 1
+            i += 1
+            continue
+        if not pats:
+            pats.append(x)
+        else:
+            files.append(x)
+        i += 1
+    if not pats:
+        return E("Usage: grep [-ABCIHKLOPRSTXZabcdefhilnqrsvwxy] [-e REGEX]... [-m MAX] [-f REGFILE] [FILE]...", 2)
+    if files:
+        return E("grep: %s: No such file or directory" % files[0], 2)
+    flags = re.I if ic else 0
+    try:
+        rx = [re.compile(re.escape(p) if fixed else bre_to_re(p, ere), flags) for p in pats]
+    except re.error:
+        return E("grep: bad regex '%s'" % pats[0], 2)
+    src = lines_of(inp or "")
+    hit = []
+    for ln in src:
+        m = any((r.search(ln) if not word else re.search(r"\b(?:%s)\b" % r.pattern, ln, flags)) for r in rx)
+        hit.append(m != inv)
+    if cnt:
+        return O("%d\n" % sum(hit), 0 if any(hit) else 1)
+    if quiet:
+        return "", "", 0 if any(hit) else 1
+    if only and not inv:
+        res = []
+        for ln in src:
+            for r in rx:
+                res += [m.group(0) for m in r.finditer(ln)]
+        return O("".join(x + "\n" for x in res), 0 if res else 1)
+    show = set()
+    for idx, h in enumerate(hit):
+        if h:
+            show.update(range(max(0, idx - ctxB), min(len(src), idx + ctxA + 1)))
+    res = []
+    last = -2
+    for idx in sorted(show):
+        if (ctxA or ctxB) and last >= 0 and idx != last + 1:
+            res.append("--")
+        res.append(("%d%s" % (idx + 1, ":" if hit[idx] else "-") if num else "") + src[idx])
+        last = idx
+    return O("".join(x + "\n" for x in res), 0 if any(hit) else 1)
+
+
+def _n_arg(a, default=10):
+    n = default
+    rest = []
+    i = 0
+    while i < len(a):
+        x = a[i]
+        if x == "-n" and i + 1 < len(a):
+            n = int(a[i + 1])
+            i += 2
+            continue
+        if re.match(r"^-\d+$", x):
+            n = int(x[1:])
+        elif x.startswith("-n") and x[2:].isdigit():
+            n = int(x[2:])
+        else:
+            rest.append(x)
+        i += 1
+    return n, rest
+
+
+def c_head(sh, a, inp):
+    n, _ = _n_arg(a)
+    return O("".join(x + "\n" for x in lines_of(inp or "")[:n]))
+
+
+def c_tail(sh, a, inp):
+    n, _ = _n_arg(a)
+    ls = lines_of(inp or "")
+    return O("".join(x + "\n" for x in (ls[-n:] if n else [])))
+
+
+def c_wc(sh, a, inp):
+    t = inp or ""
+    ls, ws, cs = len(lines_of(t)) if t else 0, len(t.split()), len(t.encode())
+    if "-l" in a:
+        return O("%d\n" % ls)
+    if "-w" in a:
+        return O("%d\n" % ws)
+    if "-c" in a:
+        return O("%d\n" % cs)
+    return O("%7d %7d %7d\n" % (ls, ws, cs))
+
+
+def c_sort(sh, a, inp):
+    ls = lines_of(inp or "")
+    if "-n" in a:
+        ls.sort(key=lambda s: float((re.match(r"\s*(-?\d+\.?\d*)", s) or [0, 0])[1] or 0))
+    else:
+        ls.sort()
+    if "-r" in a:
+        ls.reverse()
+    if "-u" in a:
+        seen = []
+        [seen.append(x) for x in ls if x not in seen]
+        ls = seen
+    return O("".join(x + "\n" for x in ls))
+
+
+def c_uniq(sh, a, inp):
+    res = []
+    for ln in lines_of(inp or ""):
+        if res and res[-1][0] == ln:
+            res[-1][1] += 1
+        else:
+            res.append([ln, 1])
+    return O("".join((("%7d " % n) if "-c" in a else "") + ln + "\n" for ln, n in res))
+
+
+def c_echo(sh, a, inp):
+    if a and a[0] == "-n":
+        return O(" ".join(a[1:]))
+    return O(" ".join(a) + "\n")
+
+
+def c_getprop(sh, a, inp):
+    props = all_props(sh.st)
+    if not a:
+        return O("".join("[%s]: [%s]\n" % (k, props[k]) for k in sorted(props)))
+    return O(props.get(a[0], a[1] if len(a) > 1 else "") + "\n")
+
+
+def c_setprop(sh, a, inp):
+    if len(a) < 2:
+        return E("usage: setprop NAME VALUE", 1)
+    return E("Failed to set property '%s' to '%s'.\nSee dmesg for error reason." % (a[0], a[1]), 1)
+
+
+def c_settings(sh, a, inp):
+    if len(a) >= 2 and a[0] == "--user":
+        a = a[2:]
+    if not a:
+        return E("usage: settings [--user NUM] [--no-sync] get|put|delete|list|reset|reset-all ...", 255)
+    sub = a[0]
+    st = sh.st["hub"]["settings"]
+    if sub not in ("get", "put", "delete", "list"):
+        return E("usage: settings [--user NUM] [--no-sync] get|put|delete|list|reset|reset-all ...", 255)
+    if len(a) < 2 or a[1] not in st:
+        return E("Invalid namespace %s\n" % (a[1] if len(a) > 1 else "") + "usage: settings [--user NUM] [--no-sync] get|put|delete|list|reset|reset-all ...", 255)
+    ns = a[1]
+    if sub == "list":
+        return O("".join("%s=%s\n" % (k, st[ns][k]) for k in sorted(st[ns])))
+    if len(a) < 3:
+        return E("usage: settings %s NAMESPACE KEY" % sub, 255)
+    key = a[2]
+    if sub == "get":
+        return O("%s\n" % st[ns].get(key, "null"))
+    if sub == "delete":
+        return O("Deleted %d rows\n" % (1 if st[ns].pop(key, None) is not None else 0))
+    if len(a) < 4:
+        return E("usage: settings put NAMESPACE KEY VALUE [TAG] [default]", 255)
+    st[ns][key] = a[3]
+    if ns == "global" and key == "mobile_data":
+        set_mobile_data(sh.st, a[3] == "1", sh.now)
+    return O()
+
+
+def pkg_or_err(sh, name, verb):
+    p = sh.st["hub"]["packages"].get(name)
+    if p is None:
+        return None, "Exception occurred while executing '%s':\njava.lang.IllegalArgumentException: Unknown package: %s" % (verb, name)
+    return p, None
+
+
+def stop_pkg(sh, name, p, reason):
+    now = sh.now
+    was = p.get("running")
+    write_log("main", now, SYS_PID, 1301, "I", "ActivityManager",
+              "Force stopping %s appid=%d user=0: %s from pid %d" % (name, p["uid"], reason, sh.pid))
+    if was:
+        write_log("main", now + 0.02, SYS_PID, 1301, "I", "ActivityManager",
+                  "Killing %d:%s/%s (adj 0): stop %s" % (p["pid"], name, uname(p), name))
+    p["running"] = False
+    p["pid"] = 0
+    if p.get("persistent"):
+        p["restart_delay"] = 1
+        p["next_restart"] = now + 1.0
+    else:
+        p["next_restart"] = None
+
+
+def c_pm(sh, a, inp):
+    pk = sh.st["hub"]["packages"]
+    if not a:
+        return E("usage: pm [list|path|grant|revoke|clear|dump|uninstall|...] ...", 1)
+    sub = a[0]
+    if sub == "list" and len(a) > 1 and a[1] == "packages":
+        opts = [x for x in a[2:] if x.startswith("-")]
+        filt = [x for x in a[2:] if not x.startswith("-")]
+        res = []
+        for n in sorted(pk):
+            p = pk[n]
+            if "-3" in opts and p["system"]:
+                continue
+            if "-s" in opts and not p["system"]:
+                continue
+            if "-d" in opts and p.get("enabled", True):
+                continue
+            if "-e" in opts and not p.get("enabled", True):
+                continue
+            if filt and filt[0] not in n:
+                continue
+            res.append("package:%s%s" % ("/data/app/~~x7Qa9w==/%s-Zk3mPq==/base.apk=" % n if "-f" in opts else "", n))
+        return O("".join(x + "\n" for x in res))
+    if sub == "list":
+        return O("")
+    if sub == "path":
+        if len(a) < 2 or a[1] not in pk:
+            return "", "", 1
+        p = pk[a[1]]
+        return O("package:%s/base.apk\n" % ("/system/app/%s" % a[1] if p["system"] else "/data/app/~~x7Qa9w==/%s-Zk3mPq==" % a[1]))
+    if sub in ("grant", "revoke"):
+        if len(a) < 3:
+            return E("Error: package name and permission must be specified", 1)
+        p, e = pkg_or_err(sh, a[1], sub)
+        if e:
+            return E(e, 255)
+        perm = a[2]
+        pm = p["permissions"].get(perm)
+        if pm is None:
+            return E("Exception occurred while executing '%s':\njava.lang.SecurityException: Package %s has not requested permission %s" % (sub, a[1], perm), 255)
+        if not pm.get("runtime"):
+            return E("Exception occurred while executing '%s':\njava.lang.SecurityException: Permission %s requested by %s is not a changeable permission type" % (sub, perm, a[1]), 255)
+        if sub == "grant":
+            pm["granted"] = True
+            pm["flags"] = "USER_SET"
+        else:
+            pm["granted"] = False
+            pm["flags"] = "USER_SET"
+            if p.get("running") and perm in p.get("requires", []):
+                stop_pkg(sh, a[1], p, "permission revoked")
+        return O()
+    if sub == "clear":
+        if len(a) < 2:
+            return E("Error: package name must be specified", 1)
+        p, e = pkg_or_err(sh, a[-1], "clear")
+        if e:
+            return E("Failed", 1)
+        stop_pkg(sh, a[-1], p, "clear data")
+        return O("Success\n")
+    if sub in ("uninstall",):
+        return O("Failure [DELETE_FAILED_DEVICE_POLICY_MANAGER]\n", 1) if a[-1] in pk and not pk[a[-1]]["system"] else O("Failure [DELETE_FAILED_INTERNAL_ERROR]\n", 1)
+    if sub == "dump":
+        return c_dumpsys(sh, ["package"] + a[1:], inp)
+    return E("Error: unknown command '%s'" % sub, 1)
+
+
+def c_am(sh, a, inp):
+    if not a:
+        return E("usage: am [subcommand] [options]", 255)
+    sub = a[0]
+    pk = sh.st["hub"]["packages"]
+    if sub in ("force-stop", "kill"):
+        rest = [x for x in a[1:] if not x.startswith("--")]
+        if not rest:
+            return E("Error: package name required", 1)
+        name = rest[-1]
+        if name in pk:
+            stop_pkg(sh, name, pk[name], "from" if sub == "force-stop" else "kill")
+        return O()
+    if sub in ("start", "startservice", "start-service", "start-foreground-service", "startfgservice"):
+        comp = None
+        for i, x in enumerate(a):
+            if x == "-n" and i + 1 < len(a):
+                comp = a[i + 1]
+        if not comp:
+            return E("Error: Intent does not specify a component (-n pkg/.Class)", 1)
+        name = comp.split("/")[0]
+        isact = sub == "start"
+        if name not in pk:
+            return E("Error type 3\nError: Activity class {%s} does not exist." % comp if isact else "Error: Not found; no service started.", 1)
+        msg = ("Starting: Intent { cmp=%s }\n" if isact else "Starting service: Intent { cmp=%s }\n") % comp
+        p = pk[name]
+        if not p.get("running") and not p["system"]:
+            attempt_start(sh.st, name, p, sh.now)
+        return O(msg)
+    if sub == "broadcast":
+        act = None
+        extras = 0
+        for i, x in enumerate(a):
+            if x == "-a" and i + 1 < len(a):
+                act = a[i + 1]
+            if x in ("--ez", "--es", "--ei") and i + 2 < len(a):
+                extras += 1
+        if not act:
+            return E("Error: Intent does not specify an action (-a)", 1)
+        if act == "android.intent.action.AIRPLANE_MODE":
+            apply_radio(sh.st, str(sh.st["hub"]["settings"]["global"].get("airplane_mode_on", "0")) == "1", sh.now)
+        return O("Broadcasting: Intent { act=%s flg=0x400000%s }\nBroadcast completed: result=0\n" % (act, " (has extras)" if extras else ""))
+    if sub == "get-current-user":
+        return O("0\n")
+    return E("Error: unknown command '%s'" % sub, 255)
+
+
+def c_svc(sh, a, inp):
+    if len(a) >= 2 and a[0] == "data" and a[1] in ("enable", "disable"):
+        set_mobile_data(sh.st, a[1] == "enable", sh.now)
+        return O()
+    if len(a) >= 2 and a[0] in ("wifi", "bluetooth", "nfc") and a[1] in ("enable", "disable"):
+        return O()
+    if len(a) >= 2 and a[0] in ("power", "usb"):
+        return O()
+    return E("Available commands:\n  help\n  power\n  data\n  wifi\n  usb\n  nfc\n  bluetooth\n  system\n", 1)
+
+
+def c_cmd(sh, a, inp):
+    if not a or a[0] == "-l":
+        return O("Currently running services:\n  activity\n  connectivity\n  package\n  phone\n  settings\n  wifi\n")
+    svc = a[0]
+    if svc == "connectivity":
+        if len(a) >= 3 and a[1] == "airplane-mode" and a[2] in ("enable", "disable"):
+            set_airplane(sh.st, a[2] == "enable", sh.now, "cmd")
+            return O()
+        return E("Unknown command: %s\nConnectivity service commands:\n  airplane-mode [enable|disable]" % " ".join(a[1:]), 255)
+    if svc == "package":
+        return c_pm(sh, a[1:], inp)
+    if svc == "settings":
+        return c_settings(sh, a[1:], inp)
+    if svc == "activity":
+        return c_am(sh, a[1:], inp)
+    if svc == "phone" and len(a) >= 3 and a[1] == "data":
+        return c_svc(sh, ["data", a[2]], inp)
+    if svc in ("phone", "wifi", "notification", "battery", "jobscheduler"):
+        return O()
+    return E("cmd: Can't find service: %s" % svc, 20)
+
+
+def c_input(sh, a, inp):
+    if not a:
+        return E("Usage: input [<source>] <command> [<arg>...]", 1)
+    return O()
+
+
+def c_reboot(sh, a, inp):
+    begin_reboot(sh.st, sh.now)
+    return O()
+
+
+PERM_FLAGS = {"": "[ ]"}
+
+
+def c_dumpsys(sh, a, inp):
+    st = sh.st
+    now = sh.now
+    if not a or a[0] == "-l":
+        return O("Currently running services:\n  activity\n  alarm\n  battery\n  connectivity\n  dropbox\n  package\n  phone\n  "
+                 "power\n  procstats\n  settings\n  telephony.registry\n  usagestats\n  wifi\n")
+    svc = a[0]
+    if svc == "battery":
+        return O("Current Battery Service state:\n  AC powered: true\n  USB powered: false\n  Wireless powered: false\n"
+                 "  Max charging current: 0\n  Max charging voltage: 0\n  Charge counter: 0\n  status: 2\n  health: 2\n"
+                 "  present: true\n  level: 100\n  scale: 100\n  voltage: 4200\n  temperature: 312\n  technology: Li-ion\n")
+    if svc == "package":
+        if len(a) < 2:
+            return O("Packages:\n  (use: dumpsys package <name>)\n")
+        name = a[1]
+        p = st["hub"]["packages"].get(name)
+        if p is None:
+            return O("Unable to find package: %s\n" % name)
+        req = sorted(p["permissions"])
+        s = ["Packages:", "  Package [%s] (3f9a1c2):" % name, "    userId=%d" % p["uid"],
+             "    pkg=Package{8a2b4c %s}" % name,
+             "    codePath=%s" % ("/system/app/" + name if p["system"] else "/data/app/~~x7Qa9w==/%s-Zk3mPq==" % name),
+             "    primaryCpuAbi=arm64-v8a", "    versionCode=%s minSdk=29 targetSdk=33" % p["code"],
+             "    versionName=%s" % p["version"], "    flags=[ %s HAS_CODE ALLOW_CLEAR_USER_DATA ]" % ("SYSTEM" if p["system"] else "PERSISTENT" if p.get("persistent") else "-"),
+             "    dataDir=/data/user/0/%s" % name, "    installerPackageName=null",
+             "    requested permissions:"]
+        s += ["      " + x for x in req]
+        s.append("    install permissions:")
+        s += ["      %s: granted=%s" % (x, "true" if p["permissions"][x]["granted"] else "false") for x in req if not p["permissions"][x]["runtime"]]
+        s.append("    User 0: ceDataInode=131077 installed=true hidden=false suspended=false stopped=%s notLaunched=false enabled=0 instant=false virtual=false"
+                 % ("false" if p.get("running") or p.get("next_restart") else "true"))
+        s.append("      gids=[3003]")
+        s.append("      runtime permissions:")
+        s += ["        %s: granted=%s, flags=[ %s]" % (x, "true" if p["permissions"][x]["granted"] else "false", (p["permissions"][x].get("flags", "") + " ") if p["permissions"][x].get("flags") else "")
+              for x in req if p["permissions"][x]["runtime"]]
+        return O("\n".join(s) + "\n")
+    if svc == "telephony.registry":
+        d = derive(st)
+        v = "IN_SERVICE" if d["in_service"] else "OUT_OF_SERVICE"
+        tech = "14(LTE)" if d["in_service"] else "0(Unknown)"
+        dc = d["data_conn_state"]
+        ip = "rmnet_data0" if dc == 2 else "null"
+        s = ["last known state:", "  Phone Id=0", "    mCallState=0", "    mCallIncomingNumber=",
+             "    mServiceState={mVoiceRegState=%d(%s), mDataRegState=%d(%s), mChannelNumber=%d, duplexMode=%d, mCellBandwidths=[], "
+             "mOperatorAlphaLong=%s, mOperatorAlphaShort=%s, mOperatorNumeric=%s, isManualNetworkSelection=false(automatic), "
+             "getRilVoiceRadioTechnology=%s, getRilDataRadioTechnology=%s, mCssIndicator=unsupported, mNetworkId=-1, mSystemId=-1, "
+             "mCdmaRoamingIndicator=-1, mIsEmergencyOnly=false, isUsingCarrierAggregation=false}" % (
+                 d["voice_reg_state"], v, d["data_reg_state"], v, 5230 if d["in_service"] else -1, 1 if d["in_service"] else 0,
+                 d["operator_alpha"], d["operator_alpha"], d["operator_numeric"], tech, tech),
+             "    mDataConnectionState=%d" % dc, "    mDataConnectionPossible=%s" % ("true" if dc == 2 else "false"),
+             "    mDataConnectionApn=%s" % ("internet" if dc == 2 else ""),
+             "    mDataConnectionLinkProperties=%s" % ("{InterfaceName: rmnet_data0 LinkAddresses: [ 100.72.18.33/30 ] ...}" if dc == 2 else "null"),
+             "    mDataConnectionNetworkCapabilities=%s" % ("[ Transports: CELLULAR Capabilities: INTERNET&NOT_METERED ]" if dc == 2 else "null"),
+             "    mSignalStrength=SignalStrength: {mLte=CellSignalStrengthLte: rsrp=%s rsrq=%s level=%d}" % (
+                 "-96" if d["in_service"] else "2147483647", "-11" if d["in_service"] else "2147483647", 3 if d["in_service"] else 0),
+             "    mCellIdentity=%s" % ("CellIdentityLte:{mCi=48231702 mPci=211 mTac=4417 mMcc=001 mMnc=01}" if d["in_service"] else "null"),
+             "    mCarrierNetworkChangeState=false", "    mDataActivity=%d" % (0)]
+        return O("\n".join(s) + "\n")
+    if svc in ("activity", "alarm", "connectivity", "dropbox", "phone", "power", "procstats", "settings", "usagestats", "wifi"):
+        return O("(dumpsys %s: not modelled by this training box)\n" % svc)
+    return E("Can't find service: %s" % svc, 20)
+
+
+def proc_rows(sh):
+    st = sh.st
+    now = sh.now
+    rows = [("root", 1, 0, "init"), ("root", 2, 0, "[kthreadd]"), ("root", 425, 1, "ueventd"), ("system", 470, 1, "servicemanager"),
+            ("system", 471, 1, "hwservicemanager"), ("logd", 612, 1, "logd"), ("root", 655, 1, "vold"), ("root", 702, 1, "qseecomd"),
+            ("root", 741, 1, "cnss-daemon"), ("system", 760, 1, "adsprpcd"), ("shell", 725, 1, "adbd"), ("system", 1250, 1, "surfaceflinger"),
+            ("radio", 905, 1, "qcrilNrd"), ("root", 812, 1, "zygote64"), ("system", SYS_PID, 812, "system_server")]
+    for n, p in sorted(st["hub"]["packages"].items(), key=lambda kv: kv[1].get("pid", 0)):
+        alive = p.get("running") and p.get("pid")
+        if not alive and p.get("last_attempt") and now < p["last_attempt"] + 0.45:
+            rows.append((uname(p), p["last_pid"], 812, n))
+        elif alive:
+            rows.append((uname(p) if p["uid"] >= 10000 else "radio" if p["uid"] == 1001 else "system", p["pid"], 812, n))
+    return rows
+
+
+def c_ps(sh, a, inp):
+    allp = any(x in ("-A", "-e", "-ef", "-Ae", "-aux", "aux", "-eA") for x in a) or "-e" in a
+    rows = proc_rows(sh) if allp else []
+    rows = rows + [("shell", sh.pid, 725, "sh"), ("shell", sh.pid + 3, sh.pid, "ps")]
+    if "-ef" in a or ("-f" in a and allp):
+        s = ["UID          PID   PPID C STIME TTY          TIME CMD"]
+        for u, pid, ppid, name in rows:
+            s.append("%-8s %7d %6d %d %s ?        00:00:%02d %s" % (u, pid, ppid, 0, "May08" if pid < 2000 else "14:02", pid % 60, name))
+        return O("\n".join(s) + "\n")
+    s = ["%-12s %6s %6s %9s %6s %-16s %5s %s %s" % ("USER", "PID", "PPID", "VSZ", "RSS", "WCHAN", "ADDR", "S", "NAME")]
+    for u, pid, ppid, name in rows:
+        s.append("%-12s %6d %6d %9d %6d %-16s %5s %s %s" % (
+            u, pid, ppid, 10900000 + (pid * 37) % 900000 if not name.startswith("[") else 0, 4300 + (pid * 53) % 90000 if not name.startswith("[") else 0,
+            "do_epoll_wait" if pid != 1 else "0", "0", "R" if name == "ps" else "S", name))
+    return O("\n".join(s) + "\n")
+
+
+def c_pidof(sh, a, inp):
+    if not a:
+        return E("usage: pidof [NAME]...", 1)
+    m = [str(pid) for u, pid, ppid, name in proc_rows(sh) if name == a[-1]]
+    return O(" ".join(m) + "\n", 0 if m else 1)
+
+
+def c_df(sh, a, inp):
+    rows = [("/dev/block/dm-4", 3043504, 3030876, "/"), ("tmpfs", 1897556, 1288, "/dev"), ("tmpfs", 1897556, 0, "/mnt"),
+            ("/dev/block/dm-6", 212580, 212556, "/vendor"), ("/dev/block/dm-7", 1096312, 1096300, "/product"),
+            ("/dev/block/by-name/metadata", 30832, 316, "/metadata"), ("/dev/block/by-name/userdata", 57482240, 19632388, "/data")]
+    human = any("h" in x for x in a if x.startswith("-"))
+
+    def hs(kb):
+        for unit, div in (("G", 1048576.0), ("M", 1024.0)):
+            if kb >= div:
+                return "%.1f%s" % (kb / div, unit)
+        return "%dK" % kb
+    s = ["%-27s %9s %9s %9s %4s %s" % ("Filesystem", "Size" if human else "1K-blocks", "Used", "Available", "Use%", "Mounted on")]
+    for fs, tot, used, mnt in rows:
+        av = tot - used
+        s.append("%-27s %9s %9s %9s %3d%% %s" % (fs, hs(tot) if human else tot, hs(used) if human else used, hs(av) if human else av,
+                                                 100 * used // tot, mnt))
+    return O("\n".join(s) + "\n")
+
+
+def c_id(sh, a, inp):
+    return O("uid=2000(shell) gid=2000(shell) groups=2000(shell),1004(input),1007(log),1011(adb),1015(sdcard_rw),1028(sdcard_r),"
+             "1078(ext_data_rw),1079(ext_obb_rw),3001(net_bt_admin),3002(net_bt),3003(inet),3006(net_bw_stats),3009(readproc),"
+             "3011(uhid),3012(readtracefs) context=u:r:shell:s0\n")
+
+
+def c_uname(sh, a, inp):
+    if "-r" in a:
+        return O("5.15.78-android13-8-g1a2b3c4d5e6f-qki\n")
+    if "-m" in a:
+        return O("aarch64\n")
+    return O("Linux localhost 5.15.78-android13-8-g1a2b3c4d5e6f-qki #1 SMP PREEMPT Tue Aug 12 06:11:03 UTC 2026 aarch64\n")
+
+
+def c_ip(sh, a, inp):
+    d = derive(sh.st)
+    args = [x for x in a if not x.startswith("-")]
+    if not args:
+        return E("Usage: ip [ OPTIONS ] OBJECT { COMMAND | help }", 255)
+    obj = args[0]
+    up = d["rmnet_up"]
+    if obj in ("addr", "a", "address") and any(x in ("-br", "-brief", "-b") for x in a):
+        rows = [("lo", "UNKNOWN", "127.0.0.1/8 ::1/128"), ("dummy0", "UNKNOWN", "fe80::681f:4cff:fe02:9bd0/64"),
+                ("eth0", "UP", "%s/24 fe80::1a:c3ff:fe7f:19e4/64" % HUB_IP),
+                ("rmnet_data0", "UNKNOWN" if up else "DOWN", "100.72.18.33/30" if up else "")]
+        dev = args[-1] if len(args) > 1 and args[-1] not in ("show", "list", "ls") else None
+        rows = [r for r in rows if not dev or r[0] == dev]
+        if dev and not rows:
+            return E('Device "%s" does not exist.' % dev, 1)
+        return O("".join(("%-16s %-14s %s" % r).rstrip() + " \n" for r in rows))
+    if obj in ("addr", "a", "address", "link", "l"):
+        dev = args[-1] if len(args) > 1 and args[-1] not in ("show", "list", "ls") else None
+        want_link = obj in ("link", "l")
+        blocks = {
+            "lo": ["1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000",
+                   "    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00"],
+            "dummy0": ["2: dummy0: <BROADCAST,NOARP,UP,LOWER_UP> mtu 1500 qdisc noqueue state UNKNOWN group default qlen 1000",
+                       "    link/ether 6a:1f:4c:02:9b:d0 brd ff:ff:ff:ff:ff:ff"],
+            "eth0": ["3: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP group default qlen 1000",
+                     "    link/ether 02:1a:c3:7f:19:e4 brd ff:ff:ff:ff:ff:ff"],
+            "rmnet_data0": (["4: rmnet_data0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UNKNOWN group default qlen 1000",
+                             "    link/[519] "] if up else
+                            ["4: rmnet_data0: <POINTOPOINT,MULTICAST,NOARP> mtu 1500 qdisc noop state DOWN group default qlen 1000",
+                             "    link/[519] "])}
+        addrs = {
+            "lo": ["    inet 127.0.0.1/8 scope host lo", "       valid_lft forever preferred_lft forever",
+                   "    inet6 ::1/128 scope host ", "       valid_lft forever preferred_lft forever"],
+            "dummy0": ["    inet6 fe80::681f:4cff:fe02:9bd0/64 scope link ", "       valid_lft forever preferred_lft forever"],
+            "eth0": ["    inet %s/24 brd 10.50.0.255 scope global eth0" % HUB_IP, "       valid_lft forever preferred_lft forever",
+                     "    inet6 fe80::1a:c3ff:fe7f:19e4/64 scope link ", "       valid_lft forever preferred_lft forever"],
+            "rmnet_data0": (["    inet 100.72.18.33/30 scope global rmnet_data0", "       valid_lft forever preferred_lft forever"] if up else [])}
+        res = []
+        for n in ("lo", "dummy0", "eth0", "rmnet_data0"):
+            if dev and dev != n:
+                continue
+            res += blocks[n] + ([] if want_link else addrs[n])
+        if dev and not res:
+            return E('Device "%s" does not exist.' % dev, 1)
+        return O("\n".join(res) + "\n")
+    if obj in ("route", "r", "ro"):
+        s = ["10.50.0.0/24 dev eth0 proto kernel scope link src %s" % HUB_IP, "default via 10.50.0.1 dev eth0 proto static"]
+        if up:
+            s = ["default via 100.72.18.34 dev rmnet_data0 metric 200"] + s + ["100.72.18.32/30 dev rmnet_data0 proto kernel scope link src 100.72.18.33"]
+        return O("\n".join(s) + "\n")
+    return E('Object "%s" is unknown, try "ip help".' % obj, 1)
+
+
+def c_ping(sh, a, inp):
+    cnt, iface, host, i = 4, None, None, 0
+    while i < len(a):
+        x = a[i]
+        if x == "-c" and i + 1 < len(a):
+            cnt = max(1, min(int(a[i + 1]), 20))
+            i += 2
+            continue
+        if x.startswith("-c") and x[2:].isdigit():
+            cnt = max(1, min(int(x[2:]), 20))
+            i += 1
+            continue
+        if x == "-I" and i + 1 < len(a):
+            iface = a[i + 1]
+            i += 2
+            continue
+        if re.match(r"^-[Wwist]\d+$", x):
+            i += 1
+            continue
+        if x in ("-W", "-w", "-i", "-s", "-t") and i + 1 < len(a):
+            i += 2
+            continue
+        if not x.startswith("-"):
+            host = x
+        i += 1
+    if not host:
+        return E("usage: ping [-LRUbdfnqrvVaAD] [-c COUNT] [-i WAIT] [-w DEADLINE] [-s PACKETSIZE] [-I IFACE] [-t TTL] [-W SECONDS] HOST", 2)
+    d = derive(sh.st)
+    wan = bool(sh.st["hub"].get("wan_up", True))
+    local = host in ("localhost", "127.0.0.1", HUB_IP)
+    if iface == "rmnet_data0":
+        up = d["rmnet_up"]
+    elif iface == "eth0":
+        up = wan
+    else:
+        up = wan or d["rmnet_up"]
+    known = re.match(r"^\d+\.\d+\.\d+\.\d+$", host) is not None
+    if not local and not known and not up:
+        return E("ping: unknown host %s" % host, 2)
+    ip = host if (known or local) else "203.0.113.10"
+    if iface and not local and not up:
+        return E("ping: sendto: Network is unreachable", 2)
+    res = ["PING %s (%s) 56(84) bytes of data." % (host, ip)]
+    if local or up:
+        for n in range(1, cnt + 1):
+            t = 0.05 if local else 36 + (n * 7 % 5)
+            res.append("64 bytes from %s: icmp_seq=%d ttl=%d time=%.1f ms" % (ip, n, 64 if local else 113, t))
+        res += ["", "--- %s ping statistics ---" % host, "%d packets transmitted, %d received, 0%% packet loss, time %dms" % (cnt, cnt, (cnt - 1) * 1002),
+                "rtt min/avg/max/mdev = 36.0/38.0/40.0/1.4 ms"]
+        return O("\n".join(res) + "\n")
+    time.sleep(min(cnt, 2))
+    res += ["", "--- %s ping statistics ---" % host, "%d packets transmitted, 0 received, 100%% packet loss, time %dms" % (cnt, cnt * 1010)]
+    return O("\n".join(res) + "\n", 1)
+
+
+def c_date(sh, a, inp):
+    return O(time.strftime("%a %b %e %H:%M:%S %Z %Y", time.localtime(sh.now)) + "\n")
+
+
+def c_uptime(sh, a, inp):
+    up = int(sh.now - sh.st["hub"]["boot_epoch"])
+    d, r = divmod(up, 86400)
+    h, r = divmod(r, 3600)
+    m = r // 60
+    ut = ("%d day%s, " % (d, "" if d == 1 else "s") if d else "") + "%d:%02d" % (h, m)
+    return O(" %s up %s,  0 users,  load average: 0.52, 0.47, 0.44\n" % (time.strftime("%H:%M:%S", time.localtime(sh.now)), ut))
+
+
+def c_whoami(sh, a, inp):
+    return O("shell\n")
+
+
+def c_sleep(sh, a, inp):
+    try:
+        time.sleep(min(float(a[0]), 30) if a else 0)
+    except ValueError:
+        return E("sleep: bad number '%s'" % a[0], 1)
+    return O()
+
+
+FAKE_FS = {"/": "acct apex bin bugreports cache config d data data_mirror debug_ramdisk dev etc init linkerconfig lost+found metadata mnt odm oem proc product sdcard storage sys system system_ext vendor",
+           "/sdcard": "Alarms Android DCIM Documents Download Movies Music Notifications Pictures Podcasts Ringtones",
+           "/sdcard/Download": "hub-diag-2026-09-24.log", "/data/local/tmp": "", "/system/bin": "am cmd dumpsys getprop input logcat pm ps settings svc"}
+
+
+def c_ls(sh, a, inp):
+    paths = [x for x in a if not x.startswith("-")] or [sh.cwd]
+    res = []
+    for p in paths:
+        q = p.rstrip("/") or "/"
+        if q not in FAKE_FS:
+            return E("ls: %s: No such file or directory" % p, 1)
+        res += FAKE_FS[q].split()
+    return O("".join(x + "\n" for x in res))
+
+
+def c_cat(sh, a, inp):
+    if not a:
+        return O(inp or "")
+    if a[0] == "/proc/version":
+        return O("Linux version 5.15.78-android13-8-g1a2b3c4d5e6f-qki (build@fh-ci) (Android clang 14.0.7) #1 SMP PREEMPT Tue Aug 12 06:11:03 UTC 2026\n")
+    if a[0] == "/system/build.prop":
+        p = all_props(sh.st)
+        return O("".join("%s=%s\n" % (k, p[k]) for k in sorted(p) if k.startswith("ro.")))
+    return E("cat: %s: No such file or directory" % a[0], 1)
+
+
+def c_cd(sh, a, inp):
+    sh.cwd = a[0] if a else "/"
+    return O()
+
+
+def c_pwd(sh, a, inp):
+    return O(sh.cwd + "\n")
+
+
+def c_true(sh, a, inp):
+    return O()
+
+
+def c_false(sh, a, inp):
+    return O("", 1)
+
+
+def c_exit(sh, a, inp):
+    raise ShellExit(int(a[0]) if a and a[0].isdigit() else 0)
+
+
+def c_logcat(sh, a, inp):
+    o = parse_logcat(a)
+    return O(logcat_render(sh.st, o))
+
+
+CMDS = {"getprop": c_getprop, "setprop": c_setprop, "settings": c_settings, "pm": c_pm, "am": c_am, "svc": c_svc, "cmd": c_cmd,
+        "input": c_input, "reboot": c_reboot, "dumpsys": c_dumpsys, "ps": c_ps, "pidof": c_pidof, "df": c_df, "id": c_id,
+        "uname": c_uname, "ip": c_ip, "date": c_date, "uptime": c_uptime, "whoami": c_whoami, "sleep": c_sleep, "ls": c_ls,
+        "cat": c_cat, "cd": c_cd, "pwd": c_pwd, "true": c_true, "false": c_false, "ping": c_ping, "exit": c_exit, "logcat": c_logcat,
+        "echo": c_echo, "grep": c_grep, "egrep": lambda sh, a, i: c_grep(sh, ["-E"] + a, i), "head": c_head, "tail": c_tail,
+        "wc": c_wc, "sort": c_sort, "uniq": c_uniq}
+
+
+def tokenize(line):
+    lx = shlex.shlex(line, posix=True, punctuation_chars=True)
+    lx.whitespace_split = True
+    return list(lx)
+
+
+def run_shell_line(sh, line):
+    """Execute one device-shell line (pipes, ; && || and simple redirects). Returns (stdout, stderr, rc)."""
+    try:
+        toks = tokenize(line)
+    except ValueError:
+        return "", "/system/bin/sh: syntax error: unterminated quoted string\n", 2
+    seq = []          # [(pipeline, op_before)]
+    cur = [[]]
+    op = ";"
+    for t in toks:
+        if t in ("|",):
+            cur.append([])
+        elif t in (";", "&&", "||", "&"):
+            seq.append((cur, op))
+            cur, op = [[]], (";" if t == "&" else t)
+        else:
+            cur[-1].append(t)
+    seq.append((cur, op))
+    all_out, all_err, rc = [], [], 0
+    for pipeline, before in seq:
+        if before == "&&" and rc != 0:
+            continue
+        if before == "||" and rc == 0:
+            continue
+        data = None
+        for ci, argv in enumerate(pipeline):
+            if not argv:
+                if len(pipeline) > 1 or any(pipeline):
+                    all_err.append("/system/bin/sh: syntax error: unexpected '|'\n")
+                    rc = 2
+                continue
+            argv, redir = split_redirects(argv)
+            name, args = argv[0], argv[1:]
+            fn = CMDS.get(name)
+            if fn is None:
+                o, e, rc = "", "/system/bin/sh: %s: inaccessible or not found\n" % name, 127
+            else:
+                try:
+                    o, e, rc = fn(sh, args, data)
+                except ShellExit:
+                    raise
+                except (ValueError, IndexError):
+                    o, e, rc = "", "%s: invalid arguments\n" % name, 1
+            if redir.get("err") == "null":
+                e = ""
+            if redir.get("err") == "out":
+                o, e = o + e, ""
+            if redir.get("out") == "null":
+                o = ""
+            elif redir.get("out") == "ro":
+                o, e, rc = "", "/system/bin/sh: can't create %s: Read-only file system\n" % redir["path"], 1
+            all_err.append(e if (not e or e.endswith("\n")) else e + "\n")
+            data = o
+        all_out.append(data or "")
+    return "".join(all_out), "".join(all_err), rc
+
+
+def split_redirects(argv):
+    args, redir, i = [], {}, 0
+    while i < len(argv):
+        t = argv[i]
+        if t in (">", ">>", ">&", "<") and i + 1 < len(argv):
+            fd = args[-1] if args and args[-1] in ("1", "2") else None
+            if fd:
+                args.pop()
+            tgt = argv[i + 1]
+            if t == ">&":
+                redir["err" if fd == "2" else "out"] = "out" if tgt == "1" else "err"
+            elif tgt == "/dev/null":
+                redir["err" if fd == "2" else "out"] = "null"
+            elif t != "<":
+                if tgt.startswith(("/sdcard", "/data/local/tmp", "/storage")):
+                    redir["err" if fd == "2" else "out"] = "null"
+                else:
+                    redir["out"] = "ro"
+                    redir["path"] = tgt
+            i += 2
+            continue
+        args.append(t)
+        i += 1
+    return args or [""], redir
+
+
+# ---------------------------------------------------------------- logcat
+def _num(v, flag):
+    try:
+        return int(v or 0)
+    except ValueError:
+        die('logcat: Invalid parameter "%s" to %s' % (v, flag))
+
+
+def parse_logcat(a):
+    o = {"dump": False, "clear": False, "bufs": [], "fmt": "threadtime", "tail": None, "max": None, "regex": None,
+         "rules": {"*": "V"}, "sizes": False, "follow_tail": None, "stats": False}
+    i = 0
+    while i < len(a):
+        x = a[i]
+
+        def val():
+            return a[i + 1] if i + 1 < len(a) else ""
+        if x in ("-d", "--dump"):
+            o["dump"] = True
+        elif x in ("-c", "--clear"):
+            o["clear"] = True
+        elif x in ("-b", "--buffer"):
+            o["bufs"] += val().split(",")
+            i += 1
+        elif x.startswith("-b") and len(x) > 2:
+            o["bufs"] += x[2:].split(",")
+        elif x in ("-v", "--format"):
+            o["fmt"] = val()
+            i += 1
+        elif x == "-t":
+            o["tail"] = _num(val(), "-t")
+            o["dump"] = True
+            i += 1
+        elif x == "-T":
+            o["follow_tail"] = _num(val(), "-T")
+            i += 1
+        elif x == "-m":
+            o["max"] = _num(val(), "-m")
+            o["dump"] = True
+            i += 1
+        elif x in ("-e", "--regex"):
+            o["regex"] = val()
+            i += 1
+        elif x == "-s":
+            o["rules"]["*"] = "S"
+        elif x in ("-g", "--buffer-size"):
+            o["sizes"] = True
+        elif x in ("-S", "--statistics"):
+            o["stats"] = True
+        elif x == "-f":
+            i += 1
+        elif x.startswith("-"):
+            pass
+        else:
+            tag, _, lv = x.partition(":")
+            o["rules"][tag] = (lv[:1].upper() or "V") if lv[:1].upper() in list(PRIO) + ["A"] else "V"
+        i += 1
+    if not o["bufs"] or "default" in o["bufs"]:
+        o["bufs"] = [b for b in o["bufs"] if b != "default"] + list(DEF_BUFS)
+    if "all" in o["bufs"]:
+        o["bufs"] = list(ALL_BUFS)
+    seen = []
+    [seen.append(b) for b in o["bufs"] if b not in seen]
+    for b in seen:
+        if b not in ALL_BUFS:
+            die("logcat: Unable to open log device '/dev/log/%s': No such file or directory" % b)
+    o["bufs"] = seen
+    return o
+
+
+def entry_visible(e, o):
+    lvl = "F" if e[3] == "A" else e[3]
+    thr = o["rules"].get(e[4], o["rules"]["*"])
+    thr = "F" if thr == "A" else thr
+    if PRIO.index(lvl) < PRIO.index(thr):
+        return False
+    if o["regex"]:
+        try:
+            if not re.search(o["regex"], e[5]):
+                return False
+        except re.error:
+            pass
+    return True
+
+
+def fmt_entry(e, f):
+    ts, pid, tid, lv, tag, msg, _ = e
+    if not ts:
+        return msg
+    if f == "brief":
+        return "%s/%s(%5d): %s" % (lv, tag, pid, msg)
+    if f == "time":
+        return "%s %s/%s(%5d): %s" % (ts, lv, tag, pid, msg)
+    if f == "tag":
+        return "%s/%s: %s" % (lv, tag, msg)
+    if f == "raw":
+        return msg
+    if f == "long":
+        return "[ %s %5d:%5d %s/%s ]\n%s\n" % (ts, pid, tid, lv, tag, msg)
+    return "%s %5d %5d %s %-8s: %s" % (ts, pid, tid, lv, tag, msg)
+
+
+def logcat_render(st, o):
+    seed_logs(st)
+    if o["sizes"]:
+        res = []
+        for b in o["bufs"]:
+            kb = (os.path.getsize(logpath(b)) // 1024) if os.path.exists(logpath(b)) else 0
+            res.append("%s: ring buffer is 256 KiB (%d KiB consumed), max entry is 5120 B, max payload is 4068 B" % (b, kb))
+        return "\n".join(res) + "\n"
+    if o["clear"]:
+        for b in o["bufs"]:
+            try:
+                open(logpath(b), "w").close()
+            except OSError:
+                pass
+        return ""
+    ents = []
+    for b in o["bufs"]:
+        ents += parse_entries(b)
+    ents.sort(key=lambda e: e[0])
+    ents = [e for e in ents if entry_visible(e, o)]
+    if o["tail"] is not None:
+        ents = ents[-o["tail"]:] if o["tail"] else []
+    if o["max"] is not None:
+        ents = ents[:o["max"]]
+    head = ""
+    if len(o["bufs"]) > 1 or o["bufs"][0] != "main":
+        pass
+    return "".join(fmt_entry(e, o["fmt"]) + "\n" for e in ents)
+
+
+def logcat_stream(o, sh_ctx=None):
+    """Client-side `adb logcat`: dump the backlog (-d exits there), then follow until Ctrl-C."""
+    counts = {}
+    first = True
+    while True:
+        with STORE.tx() as st:
+            if o["clear"] or o["sizes"]:
+                sys.stdout.write(logcat_render(st, o))
+                return 0
+            seed_logs(st)
+            new = []
+            for b in o["bufs"]:
+                lines = read_log_raw(b)
+                if len(lines) < counts.get(b, 0):
+                    counts[b] = 0
+                start = counts.get(b, 0)
+                cur = parse_entries(b)
+                if first:
+                    fresh = cur
+                else:
+                    fresh = parse_entries_from(lines, start, b)
+                counts[b] = len(lines)
+                new += fresh
+        new.sort(key=lambda e: e[0])
+        new = [e for e in new if entry_visible(e, o)]
+        if first:
+            if o["tail"] is not None:
+                new = new[-o["tail"]:] if o["tail"] else []
+            elif o["follow_tail"] is not None:
+                new = new[-o["follow_tail"]:] if o["follow_tail"] else []
+            if o["max"] is not None:
+                new = new[:o["max"]]
+        sys.stdout.write("".join(fmt_entry(e, o["fmt"]) + "\n" for e in new))
+        sys.stdout.flush()
+        first = False
+        if o["dump"]:
+            return 0
+        time.sleep(0.5)
+
+
+def parse_entries_from(lines, start, buf):
+    res = []
+    for ln in lines[start:]:
+        m = LOG_RE.match(ln)
+        if m:
+            res.append((m.group(1), int(m.group(2)), int(m.group(3)), m.group(4), m.group(5), m.group(6), buf))
+        elif ln.strip():
+            res.append(("", 0, 0, "V", "", ln, buf))
+    return res
+
+
+# ---------------------------------------------------------------- client commands
+USAGE = """Android Debug Bridge version 1.0.41
+Version 34.0.4-debian
+Installed as /usr/lib/android-sdk/platform-tools/adb
+
+global options:
+ -a         listen on all network interfaces, not just localhost
+ -d         use USB device (error if multiple devices connected)
+ -e         use TCP/IP device (error if multiple TCP/IP devices available)
+ -s SERIAL  use device with given serial (overrides $ANDROID_SERIAL)
+ -t ID      use device with given transport id
+ -H         name of adb server host [default=localhost]
+ -P         port of adb server [default=5037]
+ -L SOCKET  listen on given socket for adb server [default=tcp:localhost:5037]
+
+general commands:
+ devices [-l]             list connected devices (-l for long output)
+ help                     show this help message
+ version                  show version num
+
+networking:
+ connect HOST[:PORT]      connect to a device via TCP/IP [default port=5555]
+ disconnect [HOST[:PORT]]
+     disconnect from given TCP/IP device [default port=5555], or all
+ usb                      restart adbd listening on USB
+ tcpip PORT               restart adbd listening on TCP on PORT
+
+file transfer:
+ push [--sync] LOCAL... REMOTE
+     copy local files/directories to device
+ pull [-a] REMOTE... LOCAL
+     copy files/dirs from device
+ install [-lrtsdg] [--instant] PACKAGE
+     push a single package to the device and install it
+
+shell:
+ shell [-e ESCAPE] [-n] [-Tt] [-x] [COMMAND...]
+     run remote shell command (interactive shell if no command given)
+
+debugging:
+ logcat [-b BUFFER] [-d] [-c] [-v FORMAT] [FILTERSPEC]...
+     show device log (logcat --help for more)
+ reboot [bootloader|recovery|sideload|sideload-auto-reboot]
+     reboot the device; defaults to booting system image
+
+scripting:
+ wait-for-device          wait for device to be connected
+ get-state                print offline | bootloader | device
+ get-serialno             print <serial-number>
+ get-devpath              print <device-path>
+ kill-server              kill the server if it is running
+ start-server             ensure that there is a server running
+ reconnect                kick connection from host side to force reconnect
+ reconnect device         kick connection from device side to force reconnect
+ reconnect offline        reset offline/unauthorized devices to force reconnect
+"""
+
+UNMODELLED = ("bugreport", "backup", "restore", "sideload", "emu", "forward", "reverse", "jdwp", "sync", "mdns", "pair",
+              "remount", "disable-verity", "enable-verity", "exec-out", "exec-in", "ppp", "attach", "detach", "keygen",
+              "uninstall", "install-multiple", "track-devices", "unroot", "wait-for-usb-device", "sideload-auto-reboot")
+
+
+def parse_globals(argv):
+    o, i = {}, 0
+    while i < len(argv):
+        x = argv[i]
+        if x == "-s" and i + 1 < len(argv):
+            o["serial"] = argv[i + 1]
+            i += 2
+        elif x == "-t" and i + 1 < len(argv):
+            o["tid"] = int(argv[i + 1]) if argv[i + 1].isdigit() else -1
+            i += 2
+        elif x in ("-H", "-P", "-L") and i + 1 < len(argv):
+            i += 2
+        elif x == "-d":
+            o["usb"] = True
+            i += 1
+        elif x == "-e":
+            o["emu"] = True
+            i += 1
+        elif x in ("-a", "--one-device", "--version"):
+            if x == "--version":
+                return o, i
+            i += 1
+        else:
+            break
+    return o, i
+
+
+def sudo_reexec(argv):
+    if os.geteuid() == 0 or os.environ.get("MOCK_ADB_NO_SUDO"):
+        return
+    env = ["env"]
+    for k in ("ANDROID_SERIAL", "MOCK_ADB_DIR", "COLUMNS"):
+        if k in os.environ:
+            env.append("%s=%s" % (k, os.environ[k]))
+    try:
+        os.execvp("sudo", ["sudo", "-n"] + env + [os.path.abspath(__file__)] + argv)
+    except OSError:
+        pass
+
+
+def cmd_version():
+    out("Android Debug Bridge version 1.0.41")
+    out("Version 34.0.4-debian")
+    out("Installed as /usr/lib/android-sdk/platform-tools/adb")
+    u = os.uname()
+    out("Running on %s %s (%s)" % (u.sysname, u.release, u.machine))
+
+
+def cmd_devices(o, args):
+    with STORE.tx() as st:
+        ensure_server(st)
+        long_fmt = "-l" in args
+        out("List of devices attached")
+        for d in st["devices"]:
+            out(dev_line(d, long_fmt))
+        out()
+
+
+def cmd_connect(o, args):
+    if not args:
+        die("error: usage: adb connect HOST[:PORT]")
+    tgt = args[0]
+    host, _, port = tgt.partition(":")
+    port = port or "5555"
+    serial = "%s:%s" % (host, port)
+    sleep_after = 0
+    msg = None
+    rc = 0
+    with STORE.tx() as st:
+        ensure_server(st)
+        if any(d["serial"] == serial for d in st["devices"]):
+            msg = "already connected to %s" % serial
+        else:
+            h = st["hosts"].get(host)
+            rb = st.get("reboot")
+            down = bool(rb and time.time() < rb["until"] and h and h.get("hub"))
+            if not h:
+                sleep_after, rc = 1.5, 1
+                msg = "failed to connect to '%s': Connection timed out" % serial
+            elif down or not h.get("ports", {}).get(port):
+                rc = 1
+                msg = "failed to connect to '%s': Connection refused" % serial
+            else:
+                st["devices"].append({"serial": serial, "transport": "tcp", "tid": st["next_tid"],
+                                      "state": "device" if h.get("authorized", True) else "unauthorized"})
+                st["next_tid"] += 1
+                msg = "connected to %s" % serial
+    if sleep_after:
+        time.sleep(sleep_after)
+    out(msg)
+    return rc
+
+
+def cmd_disconnect(o, args):
+    with STORE.tx() as st:
+        ensure_server(st)
+        if not args:
+            st["devices"] = [d for d in st["devices"] if d["transport"] != "tcp"]
+            out("disconnected everything")
+            return 0
+        host, _, port = args[0].partition(":")
+        serial = "%s:%s" % (host, port or "5555")
+        if any(d["serial"] == serial and d["transport"] == "tcp" for d in st["devices"]):
+            st["devices"] = [d for d in st["devices"] if d["serial"] != serial]
+            out("disconnected %s" % serial)
+            return 0
+        err("error: no such device '%s'" % serial)
+        return 1
+
+
+def cmd_reconnect(o, args):
+    with STORE.tx() as st:
+        ensure_server(st)
+        mode = args[0] if args else ""
+        if mode == "offline":
+            targets = [d for d in st["devices"] if d["state"] in ("offline", "unauthorized")]
+        else:
+            targets = [resolve_device(st, o, need_online=False)]
+        now = st["_now"]
+        for d in list(targets):
+            if d["transport"] == "usb":
+                continue                      # usb entries are re-derived from usb_devices on every call
+            host, _, port = d["serial"].partition(":")
+            h = st["hosts"].get(host)
+            rb = st.get("reboot")
+            if h and h.get("ports", {}).get(port) and not (rb and now < rb["until"]):
+                d["state"] = "device" if h.get("authorized", True) else "unauthorized"
+            else:
+                st["devices"] = [x for x in st["devices"] if x["serial"] != d["serial"]]
+    return 0
+
+
+def cmd_shell(o, args):
+    args = list(args)
+    while args and args[0] in ("-t", "-T", "-tt", "-x", "-n", "-Tt"):
+        args.pop(0)
+    with STORE.tx() as st:
+        ensure_server(st)
+        dev = resolve_device(st, o)
+        model = "qcs6490"
+    sh = Sh()
+    if args:
+        line = " ".join(args)
+        single = tokenize_safe(line)
+        if single and single[0] == "logcat" and not any(t in single for t in ("|", ";", "&&", "||", ">", "&", "&&")):
+            lo = parse_logcat(single[1:])
+            if not lo["dump"] and not lo["clear"] and not lo["sizes"]:
+                return logcat_stream(lo)
+        with STORE.tx() as st:
+            sh.st, sh.now = st, st["_now"]
+            try:
+                so, se, rc = run_shell_line(sh, line)
+            except ShellExit as x:
+                so, se, rc = "", "", x.rc
+        sys.stdout.write(so)
+        sys.stdout.flush()
+        sys.stderr.write(se)
+        sys.stderr.flush()
+        return rc
+    tty = sys.stdin.isatty()
+    rc = 0
+    while True:
+        if tty:
+            sys.stdout.write("%s:%s $ " % (model, sh.cwd))
+            sys.stdout.flush()
+        ln = sys.stdin.readline()
+        if not ln:
+            if tty:
+                sys.stdout.write("\n")
+            return rc
+        ln = ln.strip()
+        if not ln:
+            continue
+        with STORE.tx() as st:
+            if st["devices"] and not any(d["state"] == "device" for d in st["devices"]) and not st["server"]["running"]:
+                return 1
+            sh.st, sh.now = st, st["_now"]
+            try:
+                so, se, rc = run_shell_line(sh, ln)
+            except ShellExit as x:
+                return x.rc
+        sys.stdout.write(so)
+        sys.stdout.flush()
+        sys.stderr.write(se)
+        sys.stderr.flush()
+
+
+def tokenize_safe(line):
+    try:
+        return tokenize(line)
+    except ValueError:
+        return []
+
+
+def cmd_logcat(o, args):
+    with STORE.tx() as st:
+        ensure_server(st)
+        resolve_device(st, o)
+    return logcat_stream(parse_logcat(args))
+
+
+def cmd_get_state(o, args):
+    with STORE.tx() as st:
+        ensure_server(st)
+        d = resolve_device(st, o, need_online=False)
+        if d["state"] == "unauthorized":
+            resolve_device(st, o)
+        out(d["state"] if d["state"] in ("offline", "device") else d["state"])
+
+
+def cmd_pull(o, args):
+    args = [x for x in args if x not in ("-a", "-p", "-z")]
+    if not args:
+        die("adb: error: pull requires an argument")
+    with STORE.tx() as st:
+        ensure_server(st)
+        resolve_device(st, o)
+    remote = args[0]
+    local = args[1] if len(args) > 1 else os.path.basename(remote.rstrip("/")) or "pulled"
+    if not remote.startswith(("/sdcard", "/storage", "/data/local/tmp", "/system/build.prop", "/proc")):
+        die("adb: error: failed to stat remote object '%s': No such file or directory" % remote)
+    if os.path.isdir(local):
+        local = os.path.join(local, os.path.basename(remote))
+    try:
+        with open(local, "w") as f:
+            f.write("mock adb pull of %s\n" % remote)
+        if os.environ.get("SUDO_UID"):
+            os.chown(local, int(os.environ["SUDO_UID"]), int(os.environ.get("SUDO_GID", os.environ["SUDO_UID"])))
+    except OSError as e:
+        die("adb: error: cannot create file/directory '%s': %s" % (local, e.strerror))
+    out("%s: 1 file pulled, 0 skipped. 0.0 MB/s (%d bytes in 0.001s)" % (remote, 24 + len(remote)))
+
+
+def cmd_push(o, args):
+    args = [x for x in args if x not in ("--sync", "-n", "-z")]
+    if len(args) < 2:
+        die("adb: error: push requires an argument")
+    with STORE.tx() as st:
+        ensure_server(st)
+        resolve_device(st, o)
+    src = args[0]
+    if not os.path.exists(src):
+        die("adb: error: cannot stat '%s': No such file or directory" % src)
+    n = sum(len(f) for _, _, f in os.walk(src)) if os.path.isdir(src) else 1
+    size = os.path.getsize(src) if os.path.isfile(src) else 0
+    out("%s: %d file%s pushed, 0 skipped. 0.0 MB/s (%d bytes in 0.001s)" % (src, n, "" if n == 1 else "s", size))
+
+
+def cmd_install(o, args):
+    files = [x for x in args if not x.startswith("-")]
+    if not files:
+        die("adb: error: install requires an argument")
+    with STORE.tx() as st:
+        ensure_server(st)
+        resolve_device(st, o)
+    if not os.path.exists(files[-1]):
+        die("adb: error: failed to stat %s: No such file or directory" % files[-1])
+    out("Performing Streamed Install")
+    out("Success")
+
+
+def cmd_reboot(o, args):
+    with STORE.tx() as st:
+        ensure_server(st)
+        resolve_device(st, o)
+        begin_reboot(st, st["_now"])
+
+
+def cmd_wait_for_device(o, args):
+    first = True
+    while True:
+        with STORE.tx() as st:
+            if first:
+                ensure_server(st)
+                first = False
+            try:
+                cands = [d for d in st["devices"] if (not o.get("serial") or d["serial"] == o["serial"])]
+            except KeyError:
+                cands = []
+            if any(d["state"] == "device" for d in cands):
+                return 0
+        time.sleep(0.5)
+
+
+def cmd_tcpip(o, args):
+    if not args or not args[0].isdigit():
+        die("error: usage: adb tcpip PORT")
+    with STORE.tx() as st:
+        ensure_server(st)
+        resolve_device(st, o)
+        h = st["hosts"].setdefault(HUB_IP, {"hub": True, "ports": {}})
+        h.setdefault("ports", {})[args[0]] = True
+        st["hub"]["props"]["service.adb.tcp.port"] = args[0]
+    out("restarting in TCP mode port: %s" % args[0])
+
+
+def cmd_usb(o, args):
+    with STORE.tx() as st:
+        ensure_server(st)
+        resolve_device(st, o)
+    out("restarting in USB mode")
+
+
+def client(argv):
+    o, i = parse_globals(argv)
+    rest = argv[i:]
+    if not rest:
+        sys.stdout.write(USAGE)
+        return 1
+    cmd, args = rest[0], rest[1:]
+    if cmd in ("--version", "version"):
+        cmd_version()
+        return 0
+    if cmd in ("help", "--help", "-h"):
+        sys.stdout.write(USAGE)
+        return 0
+    sudo_reexec(argv)
+    if cmd == "start-server":
+        with STORE.tx() as st:
+            ensure_server(st)
+        return 0
+    if cmd == "kill-server":
+        with STORE.tx() as st:
+            st["server"]["running"] = False
+            st["devices"] = []
+        return 0
+    table = {"devices": cmd_devices, "connect": cmd_connect, "disconnect": cmd_disconnect, "reconnect": cmd_reconnect,
+             "shell": cmd_shell, "logcat": cmd_logcat, "get-state": cmd_get_state, "pull": cmd_pull, "push": cmd_push,
+             "install": cmd_install, "reboot": cmd_reboot, "wait-for-device": cmd_wait_for_device, "tcpip": cmd_tcpip, "usb": cmd_usb}
+    if cmd in table:
+        return table[cmd](o, args) or 0
+    if cmd in ("get-serialno", "get-devpath"):
+        with STORE.tx() as st:
+            ensure_server(st)
+            d = resolve_device(st, o, need_online=False)
+            out(d["serial"] if cmd == "get-serialno" else ("usb:%s" % d.get("usb", "1-1") if d["transport"] == "usb" else "unknown"))
+        return 0
+    if cmd == "root":
+        with STORE.tx() as st:
+            ensure_server(st)
+            resolve_device(st, o)
+        out("adbd cannot run as root in production builds")
+        return 1
+    if cmd in UNMODELLED:
+        die("adb: this training box does not implement 'adb %s'" % cmd)
+    die("adb: unknown command %s" % cmd)
+
+
+# ---------------------------------------------------------------- admin interface (break.sh / check.sh)
+def walk(d, path):
+    for k in [p for p in path.split("/") if p]:
+        if isinstance(d, dict) and k in d:
+            d = d[k]
+        elif isinstance(d, list) and k.isdigit() and int(k) < len(d):
+            d = d[int(k)]
+        else:
+            raise KeyError(k)
+    return d
+
+
+def show(v):
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if v is None:
+        return "null"
+    if isinstance(v, (str, int, float)):
+        return str(v)
+    if isinstance(v, list) and all(isinstance(x, str) for x in v):
+        return "\n".join(v)
+    return json.dumps(v, indent=1, sort_keys=True)
+
+
+def admin(a):
+    if not a:
+        die("usage: adb --mock get|set|log|noise|tick|dump|reset ...")
+    sub, rest = a[0], a[1:]
+    if sub == "reset":
+        for f in [STATE_FILE] + [logpath(b) for b in ALL_BUFS]:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        return 0
+    if sub == "log":
+        if len(rest) < 7:
+            die("usage: adb --mock log BUF AGO_S PID TID LVL TAG MSG...")
+        with STORE.tx(tick=False) as st:
+            st["logs_seeded"] = True
+            write_log(rest[0], time.time() - float(rest[1]), int(rest[2]), int(rest[3]), rest[4], rest[5], " ".join(rest[6:]))
+        return 0
+    if sub == "noise":
+        if len(rest) < 3:
+            die("usage: adb --mock noise BUF N SPAN_S")
+        with STORE.tx(tick=False) as st:
+            st["logs_seeded"] = True
+            cmd_noise(rest[0], int(rest[1]), float(rest[2]), st)
+        return 0
+    with STORE.tx() as st:
+        if sub == "tick":
+            return 0
+        full = dict((k, v) for k, v in st.items() if not k.startswith("_"))
+        full["derived"] = derive(st)
+        if sub == "dump":
+            out(json.dumps(full, indent=1, sort_keys=True))
+            return 0
+        if sub == "get":
+            try:
+                out(show(walk(full, rest[0] if rest else "")))
+            except KeyError:
+                return 1
+            return 0
+        if sub == "set":
+            if len(rest) < 2:
+                die("usage: adb --mock set PATH JSON")
+            keys = [p for p in rest[0].split("/") if p]
+            d = st
+            for k in keys[:-1]:
+                d = d.setdefault(k, {})
+            d[keys[-1]] = json.loads(rest[1])
+            return 0
+    die("adb --mock: unknown subcommand %s" % sub)
+
+
+def main():
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    argv = sys.argv[1:]
+    try:
+        if argv and argv[0] == "--mock":
+            sudo_reexec(argv)
+            return admin(argv[1:])
+        return client(argv)
+    except KeyboardInterrupt:
+        return 130
+    except SystemExit:
+        raise
+    except Exception as e:                                   # never show a Python stack to the learner
+        if os.environ.get("MOCK_ADB_DEBUG"):
+            raise
+        err("adb: error: internal error (%s)" % type(e).__name__)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main() or 0)

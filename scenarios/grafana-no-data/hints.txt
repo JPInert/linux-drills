@@ -1,0 +1,3 @@
+Grafana answers, so the problem is between Grafana and its data: ask Grafana what fails when a panel loads, then check the other end is really listening where Grafana is looking.
+Container logs, listening ports, a curl straight at Prometheus, and the file Grafana loads its datasource from (a bind-mounted provisioning dir in the compose file).
+`sudo docker logs --tail 5 grafana` (--tail 5 = last 5 lines), `sudo ss -tlnp | grep 909` (-t TCP -l listening -n numbers -p program), `curl -s localhost:9090/-/ready`, `grep -r 9091 /opt/monitoring` (-r = every file below); fix the url: line with `sudo nano`, then `cd /opt/monitoring` and `sudo docker compose restart grafana` (it reads provisioning only at start).

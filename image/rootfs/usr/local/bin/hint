@@ -1,0 +1,30 @@
+#!/bin/bash
+# progressive hints: each call reveals the next, more specific one (and costs 25 XP)
+S=/var/lib/drill
+[ -f /drill/hints.txt ] || { echo "no hints for this drill"; exit 0; }
+. /usr/local/lib/drill/ui.sh
+n=$(( $(cat $S/hints 2>/dev/null || echo 0) + 1 ))
+total=$(grep -c . /drill/hints.txt)
+UI_C=$YEL
+if [ "$n" -gt "$total" ]; then
+  ui_top "NO MORE HINTS" "$total/$total used"
+  ui_row "You have seen all $total. 'playbook' is the 60-second sweep; 'solution' shows"
+  ui_row "the full path (logged as a PEEK if 'check' has not passed yet)."
+  ui_bot; exit 0
+fi
+sudo -n sh -c "echo $n > $S/hints; echo \"$(date +%s) $n\" >> $S/hintlog"   # hintlog: when, for the run log
+pips=$(ui_rep '#' "$n")$(ui_rep '-' $((total - n)))
+case $n in 1) what="which kind of problem" ;; 2) what="which tools to reach for" ;; *) what="almost the command" ;; esac
+ui_top "HINT $n/$total  [$pips]  $what" "-25 XP"
+ui_row ""
+ui_wrap "" "$(grep . /drill/hints.txt | sed -n "${n}p")" "$WHT"
+ui_row ""
+ui_bot
+# the hint's commands again, outside the box: a copy from inside the card picks up its borders and wrap
+cmds=$(grep . /drill/hints.txt | sed -n "${n}p" | grep -o '`[^`]*`' | tr -d '`' | awk '/ / && !/^[-|]/ && !seen[$0]++')
+[ -n "$cmds" ] && { printf '  %scommands (copy-safe):%s\n' "$D" "$R"; printf '%s\n' "$cmds" | sed "s/^/    $WHT/; s/\$/$R/"; }
+if [ "$n" -lt "$total" ]; then
+  printf '  %shints used: %d of %d, -%d XP so far.  Try it first; type hint again if stuck.%s\n' "$D" "$n" "$total" $((n * 25)) "$R"
+else
+  printf '  %sthat was the last one (-%d XP).  Still stuck: solution  (a PEEK if unsolved)%s\n' "$D" $((n * 25)) "$R"
+fi

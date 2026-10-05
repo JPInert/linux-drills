@@ -1,0 +1,57 @@
+# sourced by ~/.bashrc for tech and root (login and non-login)
+# shellcheck shell=bash
+case $- in *i*) ;; *) return ;; esac
+
+# the host terminal's TERM (kitty, alacritty…) may have no terminfo in the box: top, less, nano then refuse to run
+tput -T "${TERM:-dumb}" longname >/dev/null 2>&1 || export TERM=xterm-256color
+
+# the cards (ticket, hint, playbook, check) draw with box characters: need a UTF-8 locale
+case ${LANG:-} in *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) ;; *) export LANG=C.UTF-8 ;; esac
+
+export HISTFILE=$HOME/.bash_history HISTSIZE=5000 HISTFILESIZE=5000 HISTTIMEFORMAT='%s '
+shopt -s histappend
+# every command, its start time and its exit status -> /var/lib/drill/cmdlog, which drill.sh copies to the
+# host as the run log (`drill.sh review`). The start time comes from history; $? must be read first.
+_drill_cmdlog() {
+  local rc=$? h n= c=
+  history -a
+  h=$(HISTTIMEFORMAT='%s ' history 1)
+  [[ $h =~ ^\ *([0-9]+)\*?\ +([0-9]+)\ (.*)$ ]] && { n=${BASH_REMATCH[1]}; c=${BASH_REMATCH[3]}; }
+  # first prompt: history 1 is an OLD command (or none); Enter on an empty line: the number did not move
+  if [ -z "${_drill_lastn+x}" ] || [ "$n" = "$_drill_lastn" ]; then _drill_lastn=$n; return 0; fi
+  _drill_lastn=$n
+  [ -n "$n" ] && printf '%s\t%s\t%s\n' "${BASH_REMATCH[2]}" "$rc" "${c//$'\n'/ ; }" >> /var/lib/drill/cmdlog 2>/dev/null
+  return 0
+}
+PROMPT_COMMAND=_drill_cmdlog
+export PAGER='less -FRX' LESS='-FRX' EDITOR=vi SYSTEMD_PAGER='less -FRX'
+alias ls='ls --color=auto'; alias grep='grep --color=auto'
+alias ip='ip -color=auto'; alias diff='diff --color=auto'; alias egrep='grep -E --color=auto'
+export PATH=$PATH:/usr/sbin:/sbin
+
+_drill_elapsed() {
+  local s now; s=$(cat /var/lib/drill/start 2>/dev/null) || return
+  now=$(date +%s); printf '%d:%02d' $(( (now - s) / 60 )) $(( (now - s) % 60 ))
+}
+# colour prompt: [clock] user@host:path$   (root gets a red name, like most distros)
+if [ "$(id -u)" = 0 ]; then _pc='\[\e[1;31m\]'; else _pc='\[\e[1;32m\]'; fi
+PS1='\[\e[33m\][$(_drill_elapsed)]\[\e[0m\] '"$_pc"'\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ '
+unset _pc
+
+# next: leave this box and have drill.sh start the next drill straight away
+next() { sudo -n touch /var/lib/drill/next 2>/dev/null; exit; }
+
+# Realistic message; the typo is logged silently for the post-mortem.
+command_not_found_handle() {
+  printf 'bash: %s: command not found\n' "$1" >&2
+  printf '%s\n' "$1" >> /var/lib/drill/typos 2>/dev/null
+  return 127
+}
+
+# Banner once per login shell
+if [ -z "${DRILL_BANNER_SHOWN:-}" ] && [ -f /var/lib/drill/scenario ]; then
+  export DRILL_BANNER_SHOWN=1
+  ticket
+  printf '\n\e[7m %s \e[0m \e[1m%s\e[0m  \e[2mclock running\e[0m\n\n' 'cmd' \
+    'ticket  playbook  hint  check  solution  timer  next  exit'
+fi

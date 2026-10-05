@@ -1,0 +1,13 @@
+From:     NOC monitoring (auto) + site lead
+Priority: P2
+Box:      edge-nvr-03  (GPU analytics + NVR)
+
+  "The GPU health check on this box has been failing since the overnight
+   maintenance reboot. Running nvidia-smi by hand prints an error instead
+   of the usual table. The analytics is up but very slow: detections show
+   on the wall seconds late. The maintenance tool re-applied the vendor's
+   default service settings on this box, so some things may not have come
+   back the way they were."
+
+You are `tech`, with sudo. Get the GPU answering again and the analytics
+back on it. It has to come back on its own after the next reboot too.

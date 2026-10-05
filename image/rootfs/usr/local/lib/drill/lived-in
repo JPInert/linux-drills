@@ -1,0 +1,200 @@
+#!/bin/bash
+# Make the box look like a deployed edge NVR, so the learner has to separate noise from the fault.
+# usage (root, from break.sh, before or after the break): /usr/local/lib/drill/lived-in [--no-failed] [--no-ssm]
+#   --no-ssm: leave amazon-ssm-agent out (a scenario that installs its own agent)
+# Adds, all healthy, idle (no GPU, ~10 MB RSS each):
+#   amazon-ssm-agent.service          heartbeat every 5 min; history in /var/log/amazon/ssm/
+#   prometheus-node-exporter.service  [::]:9100 /metrics (user prometheus)
+#   grafana-agent.service             127.0.0.1:12345 (user grafana-agent)
+#   fwupd-refresh.timer               daily, waiting
+# Journal: kernel taint/TSC/USB-serial lines, an ntpdate "no server suitable", one WARN per agent.
+# Unless --no-failed: fwupd-refresh.service FAILED (offline: "Could not resolve hostname"), so
+# `systemctl --failed` has a red herring and is-system-running says degraded.
+# Fast (~1-2 s) and deterministic. Ports used: 9100, 12345, 12346(none listening).
+set -e
+NOFAIL=0 SSM=amazon-ssm-agent
+for a in "$@"; do case $a in --no-failed) NOFAIL=1 ;; --no-ssm) SSM= ;; *) echo "lived-in: unknown option $a" >&2; exit 2 ;; esac; done
+L=/usr/local/lib/drill/lived-in.d
+U=/usr/lib/systemd/system
+
+id prometheus >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -d /var/lib/prometheus -M prometheus
+id grafana-agent >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -d /var/lib/grafana-agent -M grafana-agent
+install -d -o prometheus -g prometheus /var/lib/prometheus /var/lib/prometheus/node-exporter
+install -d -o grafana-agent -g grafana-agent /var/lib/grafana-agent
+[ -n "$SSM" ] && install -d /etc/amazon/ssm /var/lib/amazon/ssm /var/log/amazon/ssm
+
+# the "binaries": python daemons whose ps/top/ss name is the real program's
+wrap() { printf '#!/bin/bash\nexport PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1\nexec -a %s /usr/bin/python3 < %s\n' "$1" "$2" > "$1"; chmod 0755 "$1"; }
+[ -n "$SSM" ] && wrap /usr/bin/amazon-ssm-agent $L/amazon-ssm-agent.py
+wrap /usr/bin/prometheus-node-exporter $L/prometheus-node-exporter.py
+wrap /usr/bin/grafana-agent $L/grafana-agent.py
+install -m 0755 $L/fwupdmgr /usr/bin/fwupdmgr
+
+cat > /etc/default/prometheus-node-exporter <<'CONF'
+# Set the command-line arguments to pass to the server.
+# Due to shell escaping, to pass backslashes for regexes, you need to double
+# them (\\d for \d). If running under systemd, you need to double them again
+# (\\\\d to mean \d), and escape newlines too.
+ARGS=""
+CONF
+cat > /etc/default/grafana-agent <<'CONF'
+## Path:
+## Description: Grafana Agent monitoring agent settings
+## Type:        string
+## Default:     ""
+## ServiceRestart: grafana-agent
+CONFIG_FILE="/etc/grafana-agent.yaml"
+CUSTOM_ARGS="-server.http.address=127.0.0.1:12345 -server.grpc.address=127.0.0.1:12346"
+RESTART_ON_UPGRADE=true
+CONF
+cat > /etc/grafana-agent.yaml <<'CONF'
+server:
+  log_level: info
+
+metrics:
+  global:
+    scrape_interval: 60s
+    external_labels:
+      site: northgate
+  wal_directory: /var/lib/grafana-agent/wal
+  configs:
+    - name: edge
+      scrape_configs:
+        - job_name: node
+          static_configs:
+            - targets: ['127.0.0.1:9100']
+      remote_write:
+        - url: https://prometheus.fleet.lan/api/v1/push
+
+integrations:
+  agent:
+    enabled: true
+CONF
+chmod 0640 /etc/grafana-agent.yaml; chgrp grafana-agent /etc/grafana-agent.yaml
+if [ -n "$SSM" ]; then
+printf '{"ManagedInstanceID":"mi-0c5e2a9f4b7d13e86","Region":"us-west-2"}' > /var/lib/amazon/ssm/registration
+chmod 0600 /var/lib/amazon/ssm/registration
+[ -f /etc/amazon/ssm/amazon-ssm-agent.json.template ] || printf '{\n    "Agent": {\n        "Region": "",\n        "OrchestrationRootDir": "",\n        "ContainerMode": false\n    },\n    "Mgs": {\n        "Region": "",\n        "Endpoint": "",\n        "StopTimeoutMillis": 20000,\n        "SessionWorkersLimit": 1000\n    }\n}\n' > /etc/amazon/ssm/amazon-ssm-agent.json.template
+
+# two days of the agent's own log (a file, so it CAN be old; the journal starts at this boot)
+python3 - <<'PY'
+import time
+now = int(time.time()) // 300 * 300
+L, E = [], []
+for t in range(now - 2 * 86400, now, 300):
+    s = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
+    L.append("%s INFO [HealthCheck] HealthCheck reporting agent health." % s)
+    if t % 1800 == 0:
+        L.append("%s INFO [CredentialRefresher] Next credential rotation will be in 29.98 minutes" % s)
+out = now - 6 * 86400 - 4 * 3600
+for i, m in enumerate(("[ssm-agent-worker] [MessageService] [MGSInteractor] error while reading "
+                       "message: read tcp 10.20.0.14:41826->52.94.210.31:443: read: connection "
+                       "reset by peer",
+                       "[ssm-agent-worker] [MessageService] [MGSInteractor] Failed to connect "
+                       "control channel, retrying in 7s")):
+    E.append("%s ERROR %s" % (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(out + i * 7)), m))
+open("/var/log/amazon/ssm/amazon-ssm-agent.log", "w").write("\n".join(L) + "\n")
+open("/var/log/amazon/ssm/errors.log", "w").write("\n".join(E) + "\n")
+PY
+touch -d '6 days ago' /var/log/amazon/ssm/errors.log
+fi
+
+[ -n "$SSM" ] && cat > $U/amazon-ssm-agent.service <<'UNIT'
+[Unit]
+Description=amazon-ssm-agent
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/usr/bin/
+ExecStart=/usr/bin/amazon-ssm-agent
+KillMode=process
+Restart=on-failure
+RestartForceExitStatus=SIGPIPE
+RestartSec=15min
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+cat > $U/prometheus-node-exporter.service <<'UNIT'
+[Unit]
+Description=Prometheus exporter for machine metrics
+Documentation=https://github.com/prometheus/node_exporter
+
+[Service]
+Restart=on-failure
+User=prometheus
+EnvironmentFile=/etc/default/prometheus-node-exporter
+ExecStart=/usr/bin/prometheus-node-exporter $ARGS
+ExecReload=/bin/kill -HUP $MAINPID
+TimeoutStopSec=20s
+SendSIGKILL=no
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+cat > $U/grafana-agent.service <<'UNIT'
+[Unit]
+Description=Monitoring system and forwarder
+Documentation=https://grafana.com/docs/agent/latest/
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Restart=always
+User=grafana-agent
+Environment=HOSTNAME=%H
+EnvironmentFile=/etc/default/grafana-agent
+WorkingDirectory=/var/lib/grafana-agent
+ExecStart=/usr/bin/grafana-agent --config.file $CONFIG_FILE $CUSTOM_ARGS
+ExecReload=/usr/bin/env kill -HUP $MAINPID
+TimeoutStopSec=20s
+SendSIGKILL=no
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+cat > $U/fwupd-refresh.service <<'UNIT'
+[Unit]
+Description=Refresh fwupd metadata and update motd
+Documentation=man:fwupdmgr(1)
+After=network.target network-online.target systemd-networkd.service NetworkManager.service connman.service
+
+[Service]
+Type=oneshot
+CacheDirectory=fwupdmgr
+ExecStart=/usr/bin/fwupdmgr refresh
+SuccessExitStatus=2
+UNIT
+cat > $U/fwupd-refresh.timer <<'UNIT'
+[Unit]
+Description=Refresh fwupd metadata regularly
+
+[Timer]
+OnCalendar=*-*-* 6:00
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+# boot-time noise every real box has (stamped now: the journal is volatile, this IS the boot)
+printf '%s\n' \
+  'nvidia: loading out-of-tree module taints kernel.' \
+  'nvidia: module license '"'"'NVIDIA'"'"' taints kernel.' \
+  'Disabling lock debugging due to kernel taint' \
+  '[Firmware Bug]: TSC ADJUST differs within socket(s), fixing all errors' | systemd-cat -t kernel -p warning
+printf '%s\n' \
+  'usb 1-4: new full-speed USB device number 3 using xhci_hcd' \
+  'usb 1-4: New USB device found, idVendor=10c4, idProduct=ea60, bcdDevice= 1.00' \
+  'usb 1-4: Product: CP2102 USB to UART Bridge Controller' \
+  'cp210x 1-4:1.0: cp210x converter detected' \
+  'usb 1-4: cp210x converter now attached to ttyUSB0' | systemd-cat -t kernel -p info
+echo 'no server suitable for synchronization found' | systemd-cat -t ntpdate -p warning
+
+systemctl daemon-reload
+systemctl enable $SSM prometheus-node-exporter grafana-agent fwupd-refresh.timer >/dev/null 2>&1
+systemctl start $SSM prometheus-node-exporter grafana-agent fwupd-refresh.timer
+[ $NOFAIL = 1 ] || systemctl start fwupd-refresh.service >/dev/null 2>&1 || true
+for _ in $(seq 1 30); do
+  ss -tln | grep -q ':9100 ' && ss -tln | grep -q ':12345 ' && break; sleep 0.1
+done

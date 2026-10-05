@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""Mock nvidia-smi. Reads /run/mock-gpu/*.json (written by the fake analytics daemon).
+
+Card knob (optional, for thermal/power drills): /run/mock-gpu/card.state, JSON:
+  power_limit  W the card is capped to (default 70 = vendor default; 40..70)
+  fan_max      % a fan cap set by some tool (null/absent = automatic fan curve)
+  and optional hard overrides: fan, temp, power_draw, clock_sm, reasons (list)
+Without that file every value is exactly what it always was.
+`nvidia-smi -pl W` (root) writes power_limit there, like the real one sets the card.
+"""
+import glob, json, os, subprocess, sys, time
+
+GPU = "NVIDIA RTX A2000 12GB"
+UUID = "GPU-3f0c6b1e-8a52-9d47-1c0e-5b7a2d9e4f10"
+BUS = "00000000:01:00.0"
+FAULT = "/run/mock-gpu/driver_fault"
+CARD = "/run/mock-gpu/card.state"
+PL_DEF, PL_MIN, PL_MAX = 70, 40, 70
+CLK_MAX, CLK_LOAD, CLK_IDLE = 2100, 1770, 210
+REASONS = ["Idle", "Applications Clocks Setting", "SW Power Cap", "HW Slowdown",
+           "HW Thermal Slowdown", "HW Power Brake Slowdown", "Sync Boost",
+           "SW Thermal Slowdown", "Display Clock Setting"]
+BITS = {"Idle": 0x1, "Applications Clocks Setting": 0x2, "SW Power Cap": 0x4,
+        "HW Slowdown": 0x8, "Sync Boost": 0x10, "SW Thermal Slowdown": 0x20,
+        "HW Thermal Slowdown": 0x40, "HW Power Brake Slowdown": 0x80,
+        "Display Clock Setting": 0x100}
+
+
+def procs():
+    out = []
+    for p in glob.glob("/run/mock-gpu/*.json"):
+        try:
+            d = json.load(open(p))
+            try:
+                os.kill(d["pid"], 0)                   # only live processes
+            except PermissionError:
+                pass                                   # alive, owned by another user (analytics): real nvidia-smi lists it too
+            out.append(d)
+        except Exception:
+            continue
+    return out
+
+
+def card_state():
+    try:
+        with open(CARD) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def model(util, mem):
+    """-> dict of every reading. No card.state = the historical fixed formulas."""
+    cs = card_state()
+    busy = util > 0
+    if cs is None:
+        return dict(fan=30, temp=33 + util // 4, draw=18 + util * 0.7, pl=PL_DEF,
+                    clock=CLK_LOAD if busy else CLK_IDLE, reasons=[] if busy else ["Idle"],
+                    pstate="P2" if util else "P8")
+    pl = float(cs.get("power_limit", PL_DEF))
+    auto = 55 if busy else 30
+    fan = auto if cs.get("fan_max") is None else min(auto, int(cs["fan_max"]))
+    want = 52.0 if busy else 18.0                     # what the load would draw
+    reasons = [] if busy else ["Idle"]
+    clock = CLK_LOAD if busy else CLK_IDLE
+    if busy and pl < want:
+        reasons.append("SW Power Cap")
+        clock = max(900, int(CLK_LOAD * pl / want) // 15 * 15)
+    temp = 36 if not busy else 66 + max(0, 55 - fan) * 0.9
+    if busy and temp >= 87:
+        temp = 87
+        reasons.append("SW Thermal Slowdown")
+        clock = min(clock, 1050)
+    draw = min(want, pl - 0.19) if busy else 18.0 + util * 0.2
+    if clock < CLK_LOAD and busy:
+        draw = min(draw, pl - 0.19, want * clock / CLK_LOAD + 6)
+    r = dict(fan=fan, temp=int(temp), draw=draw, pl=pl, clock=clock, reasons=reasons,
+             pstate="P2" if util else "P8")
+    for k_in, k in (("fan", "fan"), ("temp", "temp"), ("power_draw", "draw"),
+                    ("clock_sm", "clock"), ("reasons", "reasons")):
+        if cs.get(k_in) is not None:
+            r[k] = cs[k_in]
+    return r
+
+
+def set_pl(v):
+    try:
+        w = float(v)
+    except ValueError:
+        print('Invalid power limit value "%s".' % v); sys.exit(2)
+    if os.geteuid() != 0:
+        print("Unable to set the power limit for GPU %s: Insufficient Permissions" % BUS)
+        print("Terminating early due to previous errors.")
+        sys.exit(4)
+    if w < PL_MIN or w > PL_MAX:
+        print("Provided power limit %.2f W is not a valid power limit which should be between "
+              "%.2f W and %.2f W for GPU %s" % (w, PL_MIN, PL_MAX, BUS))
+        print("Terminating early due to previous errors.")
+        sys.exit(2)
+    cs = card_state() or {}
+    old = float(cs.get("power_limit", PL_DEF))
+    cs["power_limit"] = w
+    os.makedirs("/run/mock-gpu", exist_ok=True)
+    with open(CARD + ".tmp", "w") as f:
+        json.dump(cs, f)
+    os.chmod(CARD + ".tmp", 0o644)
+    os.replace(CARD + ".tmp", CARD)
+    print("Power limit for GPU %s was set to %.2f W from %.2f W." % (BUS, w, old))
+    print("All done.")
+
+
+def q_sections(m, util, mem, want):
+    """nvidia-smi -q [-d SECTION,...]"""
+    now = time.strftime("%a %b %e %H:%M:%S %Y")
+    L = ["", "==============NVSMI LOG==============", "",
+         "%-42s: %s" % ("Timestamp", now), "%-42s: %s" % ("Driver Version", "535.183.01"),
+         "%-42s: %s" % ("CUDA Version", "12.2"), "",
+         "%-42s: %s" % ("Attached GPUs", "1"), "GPU " + BUS]
+    kv = lambda k, v, ind=4: L.append("%s%-*s: %s" % (" " * ind, 42 - ind, k, v))
+    allq = not want
+    if allq:
+        kv("Product Name", GPU)
+        kv("Product Brand", "NVIDIA RTX")
+        kv("Persistence Mode", "Enabled")
+        kv("GPU UUID", UUID)
+        kv("Fan Speed", "%d %%" % m["fan"])
+    if allq or "PERFORMANCE" in want:
+        kv("Performance State", m["pstate"])
+        L.append("    Clocks Event Reasons")
+        for r in REASONS:
+            ind = 12 if r.startswith(("HW Thermal", "HW Power Brake")) else 8
+            kv(r, "Active" if r in m["reasons"] else "Not Active", ind)
+        if want == {"PERFORMANCE"} or allq:
+            L.append("    Sparse Operation Mode                 : N/A")
+    if allq or "MEMORY" in want:
+        L.append("    FB Memory Usage")
+        kv("Total", "12282 MiB", 8); kv("Reserved", "222 MiB", 8)
+        kv("Used", "%d MiB" % mem, 8); kv("Free", "%d MiB" % (12060 - mem), 8)
+    if allq or "UTILIZATION" in want:
+        L.append("    Utilization")
+        kv("Gpu", "%d %%" % util, 8); kv("Memory", "%d %%" % (util // 3), 8)
+    if allq or "TEMPERATURE" in want:
+        L.append("    Temperature")
+        kv("GPU Current Temp", "%d C" % m["temp"], 8)
+        kv("GPU T.Limit Temp", "N/A", 8)
+        kv("GPU Shutdown Temp", "98 C", 8)
+        kv("GPU Slowdown Temp", "95 C", 8)
+        kv("GPU Max Operating Temp", "87 C", 8)
+        kv("GPU Target Temperature", "83 C", 8)
+        kv("Memory Current Temp", "N/A", 8)
+        kv("Memory Max Operating Temp", "N/A", 8)
+    if allq or "POWER" in want:
+        L.append("    GPU Power Readings")
+        kv("Power Draw", "%.2f W" % m["draw"], 8)
+        kv("Current Power Limit", "%.2f W" % m["pl"], 8)
+        kv("Requested Power Limit", "%.2f W" % m["pl"], 8)
+        kv("Default Power Limit", "%.2f W" % PL_DEF, 8)
+        kv("Min Power Limit", "%.2f W" % PL_MIN, 8)
+        kv("Max Power Limit", "%.2f W" % PL_MAX, 8)
+    if allq or "CLOCK" in want:
+        L.append("    Clocks")
+        kv("Graphics", "%d MHz" % m["clock"], 8); kv("SM", "%d MHz" % m["clock"], 8)
+        kv("Memory", "%d MHz" % (6000 if util else 405), 8)
+        kv("Video", "%d MHz" % (m["clock"] * 9 // 10), 8)
+        L.append("    Max Clocks")
+        kv("Graphics", "%d MHz" % CLK_MAX, 8); kv("SM", "%d MHz" % CLK_MAX, 8)
+        kv("Memory", "6001 MHz", 8); kv("Video", "1950 MHz", 8)
+    if allq:
+        L.append("    Processes")
+        for p in procs():
+            kv("GPU instance ID", "N/A", 8); kv("Compute instance ID", "N/A", 8)
+            kv("Process ID", str(p["pid"]), 8); kv("Type", "C", 8)
+            kv("Name", p["name"], 8); kv("Used GPU Memory", "%d MiB" % p["mem_mib"], 8)
+    L.append("")
+    print("\n".join(L))
+
+
+def main():
+    a = sys.argv[1:]
+    if os.path.exists(FAULT):
+        print("NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver. Make sure that the latest NVIDIA driver is installed and running.")
+        sys.exit(9)
+    for i, x in enumerate(a):
+        if x in ("-pm", "--persistence-mode") and i + 1 < len(a):
+            if os.geteuid() != 0:
+                print("Unable to set persistence mode for GPU %s: Insufficient Permissions" % BUS)
+                print("Terminating early due to previous errors.")
+                sys.exit(4)
+            print("Persistence mode is already Enabled for GPU %s." % BUS if a[i + 1] == "1"
+                  else "Disabled persistence mode for GPU %s." % BUS)
+            print("All done.")
+            return
+        if x in ("-pl", "--power-limit") and i + 1 < len(a):
+            return set_pl(a[i + 1])
+        if x.startswith("--power-limit="):
+            return set_pl(x.split("=", 1)[1])
+    ps = procs()
+    util = min(99, sum(p.get("util", 0) for p in ps))
+    mem = sum(p.get("mem_mib", 0) for p in ps)
+    m = model(util, mem)
+    temp = m["temp"]
+    if a and a[0] == "-L":
+        print("GPU 0: %s (UUID: %s)" % (GPU, UUID)); return
+    if "-q" in a or "--query" in a:
+        want = set()
+        for i, x in enumerate(a):
+            if x in ("-d", "--display") and i + 1 < len(a):
+                want |= {w.strip().upper() for w in a[i + 1].split(",")}
+            elif x.startswith("--display="):
+                want |= {w.strip().upper() for w in x.split("=", 1)[1].split(",")}
+        return q_sections(m, util, mem, want)
+    if any(x.startswith("--query-gpu") for x in a):
+        q = [x.split("=", 1)[1] for x in a if x.startswith("--query-gpu")][0].split(",")
+        bits = 0
+        for r in m["reasons"]:
+            bits |= BITS.get(r, 0)
+        vals = {"name": GPU, "utilization.gpu": "%d %%" % util, "memory.used": "%d MiB" % mem, "memory.total": "12288 MiB",
+                "temperature.gpu": str(temp), "driver_version": "535.183.01", "uuid": UUID, "pstate": m["pstate"],
+                "power.draw": "%.2f W" % m["draw"], "power.limit": "%.2f W" % m["pl"],
+                "power.default_limit": "%.2f W" % PL_DEF, "fan.speed": "%d %%" % m["fan"],
+                "clocks.sm": "%d MHz" % m["clock"], "clocks.gr": "%d MHz" % m["clock"],
+                "clocks.max.sm": "%d MHz" % CLK_MAX,
+                "clocks_throttle_reasons.active": "0x%016X" % bits,
+                "clocks_event_reasons.active": "0x%016X" % bits}
+        fmt = [x for x in a if x.startswith("--format")]
+        nounits = fmt and "nounits" in fmt[0]
+        row = []
+        for k in q:
+            v = vals.get(k.strip(), "[N/A]")
+            row.append(v.split(" ")[0] if nounits and " " in v else v)
+        if not (fmt and "noheader" in fmt[0]):
+            print(",".join(q))
+        print(", ".join(row)); return
+    now = time.strftime("%a %b %e %H:%M:%S %Y")
+    print(now)
+    print("+---------------------------------------------------------------------------------------+")
+    print("| NVIDIA-SMI 535.183.01             Driver Version: 535.183.01   CUDA Version: 12.2     |")
+    print("|-----------------------------------------+----------------------+----------------------+")
+    print("| GPU  Name                 Persistence-M | Bus-Id        Disp.A | Volatile Uncorr. ECC |")
+    print("| Fan  Temp   Perf          Pwr:Usage/Cap |         Memory-Usage | GPU-Util  Compute M. |")
+    print("|                                         |                      |               MIG M. |")
+    print("|=========================================+======================+======================|")
+    print("|   0  %-22s          On  | 00000000:01:00.0 Off |                  Off |" % GPU[:22])
+    print("| %2d%%   %2dC    %-3s               %3dW / %3dW |   %5dMiB / 12288MiB |    %3d%%      Default |" % (m["fan"], temp, m["pstate"], int(m["draw"]), int(m["pl"]), mem, util))
+    print("|                                         |                      |                  N/A |")
+    print("+-----------------------------------------+----------------------+----------------------+")
+    print("                                                                                         ")
+    print("+---------------------------------------------------------------------------------------+")
+    print("| Processes:                                                                            |")
+    print("|  GPU   GI   CI        PID   Type   Process name                            GPU Memory |")
+    print("|        ID   ID                                                             Usage      |")
+    print("|=======================================================================================|")
+    if not ps:
+        print("|  No running processes found                                                           |")
+    for p in ps:
+        print("|    0   N/A  N/A   %8d      C   %-38s %6dMiB |" % (p["pid"], p["name"][-38:], p["mem_mib"]))
+    print("+---------------------------------------------------------------------------------------+")
+
+
+main()

@@ -1,0 +1,13 @@
+From:     NOC monitoring (auto) + site lead
+Priority: P3
+Box:      edge-nvr-03  (GPU analytics + NVR)
+
+  "Since the overnight patch window the analytics is crawling: the
+   tracking boxes on the wall trail the people by several seconds. Fleet
+   monitoring shows this box's GPU flat at 0%. The patch report lists a
+   CUDA runtime update for this box and says 'completed'. The analytics
+   service itself shows as running."
+
+You are `tech`, with sudo. Get the analytics service back on the GPU.
+The box has no route to the package mirror tonight, so work with what is
+on the disk.

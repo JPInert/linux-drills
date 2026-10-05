@@ -1,0 +1,15 @@
+From:     Night supervisor, Northgate Garage
+Priority: P2
+Box:      edge-nvr-03
+
+  "Cameras 5, 6, 7 and 8 drop out every evening around 7 and come back
+   in the morning. In the daytime they are fine. Nights are when we
+   need them most. Probably the NVR can't handle the night video?"
+
+DIAGNOSE ONLY. The building's switches send their logs to this box.
+Find why these cameras drop at night and who should fix what. Then:
+
+   answer "<the cause, what triggers it at 7, who does what>"
+   check
+
+Plain words are fine: check looks for the facts, not exact wording.

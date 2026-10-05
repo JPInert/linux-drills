@@ -1,0 +1,12 @@
+From:     NOC monitoring (auto) + site lead
+Priority: P2
+Box:      edge-nvr-03  (NVR at the Northgate Garage site)
+
+  "The camera thumbnails on the dashboard stopped updating this morning.
+   The frame-grabber keeps logging 'No space left on device', and nobody
+   can save a snapshot from the app either. But our disk monitoring says
+   the volume is about 80% free, so it makes no sense."
+
+You are `tech`, with sudo. Get thumbnails flowing again and make sure it
+does not just fill up again. The last 24 hours of frames are needed for
+an incident review: do not throw those away.

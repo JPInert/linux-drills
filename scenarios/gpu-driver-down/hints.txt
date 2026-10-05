@@ -1,0 +1,3 @@
+Work outside-in: is the card on the PCI bus, and is the kernel driver loaded? If both are fine, some program has to bring the driver up after boot, and it did not come back after the reboot. Which service is that?
+lspci lists the hardware and lsmod lists the loaded kernel modules (grep both for nvidia). Then ask systemd which NVIDIA services exist and whether each is enabled (starts at boot), and look at the status of that one.
+Run: systemctl list-unit-files | grep -i nvidia (-i = ignore upper/lower case), then systemctl status nvidia-persistenced. Fix: sudo systemctl enable --now nvidia-persistenced (enable = start at every boot, --now = and start it right now). Then sudo systemctl restart analytics: it only tries the GPU when it starts.

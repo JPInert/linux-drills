@@ -1,0 +1,53 @@
+#!/bin/bash
+# Baseline HEALTHY mock Docker engine (27.3.1 + compose v2.29); scenarios call this, then add
+# their images/workloads and break something.
+# usage (root): /usr/local/lib/drill/docker-install [--no-start]
+#   installs /usr/local/bin/docker (CLI + compose plugin), /usr/bin/dockerd, docker.service
+#   (in /usr/lib/systemd/system, so it can be masked), group docker, the nvidia runtime in
+#   /etc/docker/daemon.json, and /etc/mock-docker/images.d/ for extra images. Without
+#   --no-start it enables + starts docker and waits for /run/docker.sock.
+# Extra image:    /etc/mock-docker/images.d/<x>.json  {"repo:tag": {"kind": "k", "size": "1.2GB", ...}}
+# Its process:    /usr/local/lib/mock-docker/<kind>/__main__.py  (no such dir = one-shot image)
+set -e
+L=/usr/local/lib/mock-docker
+getent group docker >/dev/null || groupadd -r docker
+install -m 0755 $L/docker.py /usr/local/bin/docker
+install -m 0755 $L/dockerd.py /usr/bin/dockerd
+install -d -m 0710 /var/lib/docker /var/lib/docker/containers
+install -d -m 0755 /run/mock-gpu /etc/docker /usr/libexec/docker/cli-plugins /etc/mock-docker/images.d
+ln -sf /usr/local/bin/docker /usr/libexec/docker/cli-plugins/docker-compose
+
+# what `nvidia-ctk runtime configure --runtime=docker` writes: the toolkit IS set up
+[ -f /etc/docker/daemon.json ] || cat > /etc/docker/daemon.json <<'JSON'
+{
+    "runtimes": {
+        "nvidia": {
+            "args": [],
+            "path": "nvidia-container-runtime"
+        }
+    }
+}
+JSON
+
+cat > /usr/lib/systemd/system/docker.service <<'UNIT'
+[Unit]
+Description=Docker Application Container Engine
+Documentation=https://docs.docker.com
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock
+Restart=always
+RestartSec=2
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable docker >/dev/null 2>&1
+[ "${1:-}" = --no-start ] && exit 0
+systemctl start docker
+for _ in $(seq 1 40); do [ -S /run/docker.sock ] && break; sleep 0.25; done
+[ -S /run/docker.sock ]
